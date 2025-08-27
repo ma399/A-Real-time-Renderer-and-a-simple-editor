@@ -23,19 +23,13 @@ namespace glRenderer {
     class Renderer {
     public:
         Renderer(
-          /*  const Scene& scene, 
-            const glm::mat4& view, 
-            const glm::mat4& projection, 
-            const glm::vec3& camera_pos,*/
             int width,
             int height
         );
         ~Renderer();
 
         void initialize();
-        void render();
-        void pbr_render();
-        void path_tracing_render();
+        //void render();
         void process_input();
         void update_camera(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& camera_pos);
         GLuint get_color_texture() const { return color_texture_; }
@@ -48,13 +42,8 @@ namespace glRenderer {
         void end_render();
         
         // New Scene-based rendering method
-        void render(const Scene& scene, const class Camera& camera);
-        
-        // Scene-based rendering with ResourceManager and Transform support
-        void render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager);
-        
-        // Model rendering method
-        void render(const Model& model, const glm::mat4& model_matrix = glm::mat4(1.0f));
+        //void render(const Scene& scene, const class Camera& camera);
+
         
         // Render with external transform system
         void render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const class ObjectTransformSystem& transform_system);
@@ -92,25 +81,6 @@ namespace glRenderer {
         void render_composition_pass(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager);
 
     private:
-       
-
-        /*std::unique_ptr<Shader> shader;
-        std::unique_ptr<Shader> light_shader;
-        std::unique_ptr<Shader> pbr_shader;
-
-        std::vector<std::unique_ptr<Mesh>> meshes;
-        std::vector<std::unique_ptr<Model>> models;
-        std::unique_ptr<LightManager> light_manager;
-        std::vector<Material> materials;
-        std::vector<std::shared_ptr<Texture>> textures;*/
-        
-        // Transform management removed - now handled by ObjectTransformSystem
-        
-        //std::shared_ptr<Texture> pbr_albedo_texture;
-        //std::shared_ptr<Texture> pbr_normal_texture;
-        //std::shared_ptr<Texture> pbr_metallic_texture;
-        //std::shared_ptr<Texture> pbr_roughness_texture;
-        //std::shared_ptr<Texture> pbr_ao_texture;
         
         std::unique_ptr<ShadowMap> shadow_map;
         
@@ -155,9 +125,7 @@ namespace glRenderer {
         // Shadow mapping
         void render_shadow_pass();
         void render_shadow_pass_deferred(const Scene& scene, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system);
-        
-        //void load_obj_file(const std::string& file_path);
-        
+                
         // Framebuffer methods
         void setup_framebuffer();
         void cleanup_framebuffer();

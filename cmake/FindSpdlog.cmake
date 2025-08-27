@@ -11,6 +11,9 @@ if(NOT TARGET spdlog::spdlog)
     FetchContent_MakeAvailable(spdlog)
     
     target_compile_definitions(spdlog PUBLIC SPDLOG_USE_STD_FORMAT)
+    # Ensure C++20 is enabled for std::format support
+    target_compile_features(spdlog PUBLIC cxx_std_20)
+
 
     if(NOT TARGET spdlog::spdlog AND TARGET spdlog)
         add_library(spdlog::spdlog ALIAS spdlog)

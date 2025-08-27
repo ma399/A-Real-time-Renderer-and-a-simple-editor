@@ -4,9 +4,9 @@
 #include <CoroutineThreadPoolScheduler.h>
 #include <Model.h>
 #include <Material.h>
-#include "Renderer.h"
-#include "InputManager.h"
-#include "ObjectTransformSystem.h"
+#include <Renderer.h>
+#include <InputManager.h>
+#include <ObjectTransformSystem.h>
 
 
 Application::Application(const std::string& title) 
@@ -52,8 +52,8 @@ bool Application::initialize(){
             throw std::runtime_error("Failed to initialize InputManager");
         }
         
-        // Enable debug logging to troubleshoot mouse movement and raycast
-        Logger::get_instance().enable_debug();
+        // Enable debug logging
+        //Logger::get_instance().enable_debug();
 
         // Calculate initial viewport size and aspect ratio
         calculate_initial_viewport();
@@ -200,8 +200,7 @@ void Application::run() {
                             renderer_->render(*scene_, *camera_, *resource_manager_, *transform_system);
                         }
                     } else {
-                        LOG_WARN("Application: No transform system available, using fallback rendering");
-                        renderer_->render(*scene_, *camera_, *resource_manager_);
+                        LOG_ERROR("Application: No transform system available");
                     }
 
                 }

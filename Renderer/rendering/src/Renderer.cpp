@@ -365,112 +365,6 @@ namespace glRenderer {
             glViewport(0, 0, width_, height_);
         }
     }
-
-    void Renderer::render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
-
-           
-        // Check if scene is empty
-        if (scene.is_empty()) {
-            LOG_ERROR("Renderer: Scene is empty, skipping rendering");
-            return;
-        }
-        
-        // Enable rendering to framebuffer
-        set_render_to_framebuffer(true);
-        
-        // Clear the framebuffer
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        
-        // Enable depth test
-        glEnable(GL_DEPTH_TEST);
-
-        // Update camera matrices
-        glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
-        glm::vec3 camera_pos = camera.get_position();
-        
-        // Get main shader from ResourceManager
-        auto main_shader = resource_manager.get_shader("simple_scene_main_shader");
-        if (!main_shader) {
-            LOG_ERROR("Renderer: Main shader not found in ResourceManager");
-            return;
-        }
-        
-        main_shader->use();
-        
-        // Set camera matrices
-        main_shader->set_mat4("view", view);
-        main_shader->set_mat4("projection", projection);
-        main_shader->set_vec3("viewPos", camera_pos);
-        
-        // Set ambient lighting from scene
-        const glm::vec3 ambient_light = scene.get_ambient_light();
-        main_shader->set_vec3("ambientLight", glm::vec3(ambient_light[0], ambient_light[1], ambient_light[2]));
-        
-        // Set up lighting
-        const auto& light_refs = scene.get_light_references();
-        size_t light_size = light_refs.size();
-        main_shader->set_int("numLights", static_cast<int>(light_size));
-        
-        for (size_t i = 0; i < light_size && i < 8; ++i) {  // Limit to 8 lights
-            const auto& light_id = light_refs[i];
-            
-            // Get light
-            auto light = resource_manager.get<Light>(light_id);
-            if (light) {
-                light->set_shader(*main_shader); 
-            } else {
-                LOG_WARN("Renderer: Light '{}' not found in ResourceManager", light_id);
-            }
-        }
-        
-        // Render all models in the scene
-        const auto& model_refs = scene.get_model_references();
-        //LOG_DEBUG("Renderer: Rendering {} models", model_refs.size());
-        
-        for (const auto& model_id : model_refs) {
-            // Get model from ResourceManager
-            auto model = resource_manager.get<Model>(model_id);
-            if (!model) {
-                LOG_WARN("Renderer: Model '{}' not found in ResourceManager", model_id);
-                continue;
-            }
-            
-            // Validate model has required components
-            if (!model->has_mesh()) {
-                LOG_WARN("Renderer: Model '{}' has no mesh, skipping", model_id);
-                continue;
-            }
-            
-            if (!model->has_material()) {
-                LOG_WARN("Renderer: Model '{}' has no material, skipping", model_id);
-                continue;
-            }
-            
-            // Use identity transform - transforms should be managed externally
-            Transform model_transform = Transform::identity();
-            
-            // Set model matrix
-            glm::mat4 model_matrix = model_transform.get_model_matrix();
-            main_shader->set_mat4("model", model_matrix);
-            
-            // Set material properties
-            const Material& material = *model->get_material();
-            material.set_shader(*main_shader, "material");
-            
-            // Render the model's mesh
-            try {
-                const Mesh& mesh = *model->get_mesh();
-                mesh.draw();
-                //LOG_DEBUG("Renderer: Successfully rendered model '{}'", model_id);
-            } catch (const std::exception& e) {
-                LOG_ERROR("Renderer: Failed to render model '{}': {}", model_id, e.what());
-                continue;
-            }
-        }
-
-    }
     
     void Renderer::bind_g_buffer_for_geometry_pass() {
       glBindFramebuffer(GL_FRAMEBUFFER, g_buffer_fbo_);
@@ -531,7 +425,7 @@ namespace glRenderer {
         
         // Shadow Pass 
         if (shadow_map) {
-            LOG_INFO("Renderer: Rendering shadow pass for deferred rendering");
+            //LOG_INFO("Renderer: Rendering shadow pass for deferred rendering");
             render_shadow_pass_deferred(scene, resource_manager, transform_system);
         }
         
@@ -792,7 +686,7 @@ namespace glRenderer {
         glEnable(GL_DEPTH_TEST);
     }
     
-    // New render method that uses ObjectTransformSystem
+    
     void Renderer::render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system) {
         // Check if scene is empty
         if (scene.is_empty()) {
@@ -1277,7 +1171,7 @@ namespace glRenderer {
             if (skybox_texture) {
                 skybox_texture->bind_cube_map(0);  // Use texture unit 0
                 plane_shader->set_int("skybox", 0);
-                LOG_INFO("Renderer: Skybox texture ID {} bound to unit 0 for plane reflection", skybox_texture->get_id());
+                //LOG_INFO("Renderer: Skybox texture ID {} bound to unit 0 for plane reflection", skybox_texture->get_id());
             } else {
                 LOG_ERROR("Renderer: Skybox texture not found for plane reflection");
             }

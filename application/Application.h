@@ -4,7 +4,6 @@
 #include <atomic>
 #include <optional>
 
-//#include "Renderer.h"
 #include "GUI.h"
 #include "Camera.h"
 #include "InputManager.h"
@@ -58,16 +57,9 @@ public:
                             const std::string& light_type,
                             float x, float y, float z,
                             float r, float g, float b);
-    void render_scene(class Shader& shader);
     Scene& get_scene() { return *scene_; }
     const Scene& get_scene() const { return *scene_; }
-    void clear_scene();
-    
-    // GUI callback handlers
-    void handle_model_add(const std::string& model_name);
-    
-    // Initialize default test models
-    void create_default_test_models();
+    void clear_scene();    
     
     // Resource cache access for GUI
     std::vector<std::string> get_texture_names() const;
@@ -110,20 +102,12 @@ private:
 
     void update_delta_time();
     void setup_event_handlers();
-    void handle_file_load(const std::string& file_path);
     void on_viewport_resize(int width, int height);
     void calculate_initial_viewport();
     
     // Input callback handlers
-    void handle_keyboard_input(int key, float deltaTime);
     void handle_mouse_movement(float xOffset, float yOffset);
-    void handle_mouse_button(int button, int action);
     void handle_window_close();
-    
-    // Drag callback handlers
-    void handle_drag_start(const std::string& model_id, float screen_x, float screen_y);
-    void handle_drag_update(const std::string& model_id, float screen_x, float screen_y);
-    void handle_drag_end(const std::string& model_id);
 
     static void framebuffer_size_callback(GLFWwindow* window, int width, int height);
     static void mouse_movement_callback(GLFWwindow* window, double xpos, double ypos);

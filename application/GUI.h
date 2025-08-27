@@ -9,7 +9,6 @@
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include "FileDialogManager.h"
-// #include "LoadingDialog.h"
 
 class Window;
 
@@ -37,8 +36,6 @@ public:
                                     std::function<std::vector<std::string>()> get_material_names);
     
     bool is_mouse_in_viewport(double mouse_x, double mouse_y) const;
-    
-    // LoadingDialog* getLoadingDialog() { return loadingDialog_.get(); }
     
     // Model loading progress management
     void set_model_loading_progress(const std::string& model_name, float progress, const std::string& message);

@@ -78,7 +78,6 @@ bool GUI::initialize(GLFWwindow* window) {
 
     LOG_INFO("Imgui initialized successfully");
     
-    // AsyncLoader now managed by ResourceManager through Application
     initialized_ = true;
     return true;
 }
@@ -87,9 +86,7 @@ void GUI::cleanup() {
     if (!initialized_) {
         return;
     }
-    
-    // AsyncLoader cleanup handled by ResourceManager
-  
+      
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -161,19 +158,6 @@ void GUI::render() {
 
     // Display file dialog using FileDialogManager
     file_dialog_manager_->display_dialog();
-    
-    // Display loading dialog only if no inline progress is active
-    // bool hasInlineProgress = false;
-    // for (const auto& [modelName, loadingState] : model_loading_states_) {
-    //     if (loadingState.is_loading) {
-    //         hasInlineProgress = true;
-    //         break;
-    //     }
-    // }
-    
-    // if (!hasInlineProgress) {
-    //     loadingDialog_->render();
-    // }
 }
 
 void GUI::render_smart_layout() {

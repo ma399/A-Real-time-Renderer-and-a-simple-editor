@@ -50,8 +50,8 @@ bool ShadowMap::initialize(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     
     try {
-        shadow_shader_ = std::make_unique<Shader>("D:/Graphics/assets/shaders/shadow_map_vertex.glsl", 
-                                               "D:/Graphics/assets/shaders/shadow_map_fragment.glsl");
+        shadow_shader_ = std::make_unique<Shader>("../assets/shaders/shadow_map_vertex.glsl", 
+                                               "../assets/shaders/shadow_map_fragment.glsl");
         LOG_INFO("Shadow shader created successfully");
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to create shadow shader: {}");
