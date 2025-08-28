@@ -85,16 +85,7 @@ Async::Task<std::shared_ptr<Mesh>> CoroutineResourceManager::load_mesh_async(con
             co_return nullptr;
         }
         
-        // Additional check for scheduler state
-        if (!scheduler_->is_running()) {
-            LOG_ERROR("CoroutineResourceManager: Scheduler is not running for mesh loading");
-            if (progressCallback) {
-                progressCallback(0.0f, "Scheduler not running");
-            }
-            co_return nullptr;
-        }
-        
-        LOG_DEBUG("CoroutineResourceManager: Scheduler is available and running, proceeding with mesh loading");
+
         
         // Use AssimpLoader directly in thread pool
         auto mesh = co_await scheduler_->submit_to_threadpool(priority, [this, path, progressCallback]() -> std::shared_ptr<Mesh> {
@@ -333,6 +324,16 @@ void CoroutineResourceManager::update_stats(Async::TaskPriority priority, bool c
 
 std::shared_ptr<Model> CoroutineResourceManager::assemble_model(const std::string& mesh_path, const std::string& material_path) {
     
+    // Generate model ID from mesh and material paths
+    std::string model_id = mesh_path + "|" + material_path;
+    
+    // Check if model is already cached
+    auto cached_model = get<Model>(model_id);
+    if (cached_model) {
+        LOG_DEBUG("CoroutineResourceManager: Found cached model: {}", model_id);
+        return cached_model;
+    }
+    
     // Load mesh
     auto mesh = get<Mesh>(mesh_path);
     if (!mesh) {
@@ -349,6 +350,10 @@ std::shared_ptr<Model> CoroutineResourceManager::assemble_model(const std::strin
     
     // Create model 
     auto model = std::make_shared<Model>(mesh.get(), material.get());
+    
+    // Store model in cache
+    store_model_in_cache(model_id, model);
+    LOG_INFO("CoroutineResourceManager: Assembled and cached model '{}'", model_id);
 
     return model;
 }
@@ -457,6 +462,89 @@ void CoroutineResourceManager::store_light_in_cache(const std::string& light_id,
     light_cache_[light_id] = light;
     LOG_DEBUG("CoroutineResourceManager: Light '{}' stored in cache", light_id);
 }
+
+void CoroutineResourceManager::store_material_in_cache(const std::string& material_id, std::shared_ptr<Material> material) {
+    if (!material) {
+        LOG_ERROR("CoroutineResourceManager: Invalid material pointer for '{}'", material_id);
+        return;
+    }
+    
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    material_cache_[material_id] = material;
+    LOG_DEBUG("CoroutineResourceManager: Material '{}' stored in cache", material_id);
+}
+
+void CoroutineResourceManager::store_model_in_cache(const std::string& model_id, std::shared_ptr<Model> model) {
+    if (!model) {
+        LOG_ERROR("CoroutineResourceManager: Invalid model pointer for '{}'", model_id);
+        return;
+    }
+    
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    // Don't normalize model IDs that contain "|" as they are composite IDs
+    model_cache_[model_id] = model;
+    LOG_DEBUG("CoroutineResourceManager: Model '{}' stored in cache", model_id);
+}
+
+void CoroutineResourceManager::store_mesh_in_cache(const std::string& mesh_id, std::shared_ptr<Mesh> mesh) {
+    if (!mesh) {
+        LOG_ERROR("CoroutineResourceManager: Invalid mesh pointer for '{}'", mesh_id);
+        return;
+    }
+    
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    mesh_cache_[mesh_id] = mesh;
+    LOG_DEBUG("CoroutineResourceManager: Mesh '{}' stored in cache", mesh_id);
+}
+
+std::shared_ptr<Model> CoroutineResourceManager::create_model_with_default_material(const std::string& mesh_path, const std::string& model_name) {
+    LOG_INFO("CoroutineResourceManager: Creating model '{}' with default material from mesh '{}'", model_name, mesh_path);
+    
+    // Check if model is already cached
+    auto cached_model = get<Model>(model_name);
+    if (cached_model) {
+        LOG_DEBUG("CoroutineResourceManager: Found cached model: {}", model_name);
+        return cached_model;
+    }
+    
+    // Load mesh (should already be cached from the async load)
+    auto mesh = get<Mesh>(mesh_path);
+    if (!mesh) {
+        LOG_ERROR("CoroutineResourceManager: Failed to load mesh from path: {}", mesh_path);
+        return nullptr;
+    }
+    
+    // Create default material for imported models
+    auto default_material = std::make_shared<Material>(Material::create_pbr_default());
+    default_material->set_albedo(glm::vec3(0.8f, 0.2f, 0.2f)); // Bright red color
+    default_material->set_metallic(0.1f);
+    default_material->set_roughness(0.7f);
+    
+    // Store material with a consistent naming scheme
+    std::string material_id = "default_material_" + model_name;
+    store_material_in_cache(material_id, default_material);
+    LOG_DEBUG("CoroutineResourceManager: Created and cached default material '{}'", material_id);
+    
+    // Create and cache the model
+    auto model = std::make_shared<Model>(mesh.get(), default_material.get());
+    store_model_in_cache(model_name, model);
+    LOG_INFO("CoroutineResourceManager: Created and cached model '{}'", model_name);
+    
+    return model;
+}
+
+// std::shared_ptr<Model> CoroutineResourceManager::get_model(const std::string& model_id) const {
+//     std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+//     auto it = model_cache_.find(model_id);
+    
+//     if (it != model_cache_.end()) {
+//         LOG_DEBUG("CoroutineResourceManager: Retrieved cached model: {}", model_id);
+//         return it->second;
+//     }
+    
+//     LOG_DEBUG("CoroutineResourceManager: Model not found in cache: {}", model_id);
+//     return nullptr;
+// }
 
 std::shared_ptr<Shader> CoroutineResourceManager::create_shader(const std::string& shaderName,
                                                                 const std::string& vertexPath,

@@ -50,9 +50,7 @@ public:
     void check_pending_model_load();
 
     // Scene management operations
-    bool assemble_and_add_model_to_scene(const std::string& mesh_path, 
-                                        const std::string& material_path,
-                                        const std::string& model_id);
+
     bool add_light_to_scene(const std::string& light_id, 
                             const std::string& light_type,
                             float x, float y, float z,
@@ -88,6 +86,7 @@ private:
     std::atomic<LoadState> load_state_;
     float last_progress_set_;                                   // Track last progress value to avoid redundant updates
     std::string current_loading_model_name_;                     // Track the name of the currently loading model
+    std::string current_loading_model_path_;                     // Track the full path of the currently loading model
 
     bool initialized_;
     int width_;

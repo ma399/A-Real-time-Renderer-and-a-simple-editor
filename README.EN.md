@@ -289,11 +289,18 @@ classDiagram
     }
 
     %% Transform System
-    class ObjectTransformSystem {
+    class TransformManager {
         -unordered_map transforms_
-        +set_transform(id, transform) void
-        +get_transform(id) Transform
-        +update_transform(id, transform) void
+        -DragInfo drag_info_
+        -TransformMode current_mode_
+        +get_transform(model_id) Transform&
+        +set_transform(model_id, transform) void
+        +get_model_matrix(model_id) mat4
+        +start_drag(screen_x, screen_y, screen_width, screen_height, camera, scene, resource_manager) bool
+        +update_drag(screen_x, screen_y, screen_width, screen_height, camera) bool
+        +end_drag() void
+        +is_dragging() bool
+        +set_transform_mode(mode) void
     }
 
     class Transform {
@@ -306,14 +313,45 @@ classDiagram
         +scale(factor) void
     }
 
+    %% Raycast Utilities
+    class RaycastUtils {
+        +screen_to_world_ray(screen_x, screen_y, screen_width, screen_height, camera) Ray
+        +raycast_scene(ray, scene, resource_manager, get_transform_callback) RaycastHit
+        +ray_triangle_intersect(ray, v0, v1, v2, hit) bool
+        +ray_mesh_intersect(ray, mesh, model_matrix, model_id, hit) bool
+    }
+
+    class RaycastHit {
+        -bool hit
+        -vec3 point
+        -vec3 normal
+        -float distance
+        -string model_id
+        -size_t triangle_index
+        -float u, v, w
+    }
+
+    class Ray {
+        -vec3 origin
+        -vec3 direction
+    }
+
     %% Input and UI System
     class InputManager {
         -Camera* camera_
+        -unique_ptr transform_manager_
+        -Scene* scene_
+        -CoroutineResourceManager* resource_manager_
         -bool keys_
         -float last_x_, last_y_
+        -bool drag_enabled_
+        +initialize_transform_system(camera, scene, resource_manager) bool
         +process_keyboard(key, deltaTime) void
         +process_mouse_movement(xpos, ypos) void
         +process_mouse_button(button, action) void
+        +is_dragging() bool
+        +get_model_transform(model_id) Transform
+        +get_transform_manager() TransformManager*
     }
 
     class GUI {
@@ -372,9 +410,13 @@ classDiagram
     Scene --> Light : references
 
     InputManager --> Camera : controls
+    InputManager --> TransformManager : contains
     GUI --> Application : interacts
 
-    ObjectTransformSystem --> Transform : manages
+    TransformManager --> Transform : manages
+    TransformManager --> RaycastUtils : uses
+    RaycastUtils --> Ray : creates
+    RaycastUtils --> RaycastHit : returns
 ```
 
 ### Architecture Overview

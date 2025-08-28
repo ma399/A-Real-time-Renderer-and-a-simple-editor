@@ -6,14 +6,15 @@ set(COMMON_SOURCES
     common/src/AssimpLoader.cpp
     common/src/CoroutineResourceManager.cpp
     common/src/CoroutineThreadPoolScheduler.cpp
-    common/src/DragHandler.cpp
     common/src/EnhancedThreadPool.cpp
     common/src/FileDialog.cpp
     common/src/FileDialogManager.cpp
     common/src/InputManager.cpp
     common/src/Logger.cpp
+    common/src/RaycastUtils.cpp
     common/src/STBImage.cpp
     common/src/ThreadPool.cpp
+    common/src/TransformManager.cpp
     common/src/Window.cpp
 )
 
@@ -21,7 +22,6 @@ set(COMMON_HEADERS
     common/include/AssimpLoader.h
     common/include/CoroutineResourceManager.h
     common/include/CoroutineThreadPoolScheduler.h
-    common/include/DragHandler.h
     common/include/EnhancedThreadPool.h
     common/include/FileDialog.h
     common/include/FileDialogManager.h
@@ -29,11 +29,12 @@ set(COMMON_HEADERS
     common/include/LoadingDialog.h
     common/include/Logger.h
     common/include/PriorityTaskQueue.h
-    common/include/RaycastSystem.h
+    common/include/RaycastUtils.h
     common/include/STBImage.h
     common/include/Task.h
     common/include/TaskPriority.h
     common/include/ThreadPool.h
+    common/include/TransformManager.h
     common/include/Window.h
 )
 
@@ -44,8 +45,7 @@ set(RENDERING_SOURCES
     rendering/src/Material.cpp
     rendering/src/Mesh.cpp
     rendering/src/Model.cpp
-    rendering/src/ObjectTransformSystem.cpp
-    rendering/src/RaycastSystem.cpp
+
     rendering/src/Renderer.cpp
     rendering/src/Scene.cpp
     rendering/src/Shader.cpp
@@ -60,7 +60,7 @@ set(RENDERING_HEADERS
     rendering/include/Material.h
     rendering/include/Mesh.h
     rendering/include/Model.h
-    rendering/include/ObjectTransformSystem.h
+
     rendering/include/Renderer.h
     rendering/include/Scene.h
     rendering/include/Shader.h

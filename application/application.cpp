@@ -6,7 +6,7 @@
 #include <Material.h>
 #include <Renderer.h>
 #include <InputManager.h>
-#include <ObjectTransformSystem.h>
+#include <TransformManager.h>
 
 
 Application::Application(const std::string& title) 
@@ -76,26 +76,19 @@ bool Application::initialize(){
             // Create scene first
             scene_ = resource_manager_->create_simple_scene();
             
-            // Initialize drag system now that all components are ready
-            if (!input_manager_->initialize_drag_system(camera_, scene_.get(), resource_manager_.get())) {
-                LOG_WARN("Application: Failed to initialize drag system - drag functionality will be disabled");
+            // Initialize transform system now that all components are ready
+            if (!input_manager_->initialize_transform_system(camera_, scene_.get(), resource_manager_.get())) {
+                LOG_WARN("Application: Failed to initialize transform system - drag functionality will be disabled");
             } else {
-                LOG_INFO("Application: Drag system initialized successfully");
+                LOG_INFO("Application: Transform system initialized successfully");
                 
                 // Set up rotation animation for the default cube model
-                ObjectTransformSystem* transform_system = input_manager_->get_transform_system();
-                if (transform_system) {
-                    transform_system->set_rotation_animation("simple_scene_cube_model", true, glm::vec3(0.5f, 0.3f, 0.0f));
-                    LOG_INFO("Application: Enabled rotation animation for default cube model");
-                    
-                    // Verify animation was set
-                    if (transform_system->has_animation("simple_scene_cube_model")) {
-                        LOG_INFO("Application: Confirmed cube model has animation enabled");
-                    } else {
-                        LOG_WARN("Application: Failed to enable animation for cube model");
-                    }
+                TransformManager* transform_manager = input_manager_->get_transform_manager();
+                if (transform_manager) {
+                    // Note: Animation functionality will be added to TransformManager later if needed
+                    LOG_INFO("Application: Transform manager available for future animation setup");
                 } else {
-                    LOG_WARN("Application: Could not get transform system to set up cube rotation");
+                    LOG_WARN("Application: Could not get transform manager to set up cube rotation");
                 }
             }
 
@@ -184,23 +177,19 @@ void Application::run() {
             try {    
                 if (!scene_->is_empty()) {
                     
-                    // Get transform system for rendering
-                    ObjectTransformSystem* transform_system = input_manager_->get_transform_system();
-                    if (transform_system) {
-                        // Update animations with current time
-                        float current_time = static_cast<float>(glfwGetTime());
-                        transform_system->update_animations(current_time);
-                            
+                    // Get transform manager for rendering
+                    TransformManager* transform_manager = input_manager_->get_transform_manager();
+                    if (transform_manager) {
                         // Use deferred rendering if enabled, otherwise use forward rendering
                         if (renderer_->is_deferred_rendering_enabled()) {
                             LOG_DEBUG("Application: Using deferred rendering");
-                            renderer_->render_deferred(*scene_, *camera_, *resource_manager_, *transform_system);
+                            renderer_->render_deferred(*scene_, *camera_, *resource_manager_, *transform_manager);
                         } else {
-                            LOG_DEBUG("Application: Using forward rendering with ObjectTransformSystem");
-                            renderer_->render(*scene_, *camera_, *resource_manager_, *transform_system);
+                            LOG_DEBUG("Application: Using forward rendering with TransformManager");
+                            renderer_->render(*scene_, *camera_, *resource_manager_, *transform_manager);
                         }
                     } else {
-                        LOG_ERROR("Application: No transform system available");
+                        LOG_ERROR("Application: No transform manager available");
                     }
 
                 }
@@ -265,6 +254,7 @@ void Application::request_model_load(const std::string& filePath) {
     
     std::filesystem::path path(filePath);
     current_loading_model_name_ = path.filename().string();
+    current_loading_model_path_ = filePath;  // Store the full file path
     if (ui_) {
         ui_->set_model_loading_progress(current_loading_model_name_, 0.1f, "Starting load...");
     }
@@ -349,6 +339,40 @@ void Application::check_pending_model_load() {
             if (mesh.has_value() && mesh.value()) {
                 LOG_INFO("Application: Mesh loaded successfully");
 
+                // Let ResourceManager handle everything - mesh is already cached
+                std::string mesh_path = current_loading_model_path_;
+                std::string model_name = current_loading_model_name_; // Use mesh name as model name
+                
+                // Request ResourceManager to create a model with default material
+                // ResourceManager will handle material creation and model assembly
+                auto assembled_model = resource_manager_->create_model_with_default_material(mesh_path, model_name);
+                if (assembled_model) {
+                    // CRITICAL: Force mesh setup in main thread to ensure VAO is initialized
+                    auto mesh = assembled_model->get_mesh();
+                    
+                    // Simply get the assembled model from ResourceManager and add to scene
+                    scene_->add_model_reference(model_name);
+                    LOG_INFO("Application: Added model '{}' to scene", model_name);
+                    // Set position to top-left corner of screen
+                    TransformManager* transform_manager = input_manager_->get_transform_manager();
+                    if (transform_manager) {
+                        
+                        glm::vec3 center_position(0.0f, 0.0f, -1.5f);
+                        
+                        Transform model_transform;
+                        model_transform.set_position(center_position);
+                        model_transform.set_scale(5.0f); // Scale UP to make it clearly visible
+                        
+                        transform_manager->set_transform(model_name, model_transform);
+                        
+                        LOG_INFO("Application: Set transform for model '{}' at position ({}, {}, {}) with scale {}", 
+                                model_name, center_position.x, center_position.y, center_position.z, 5.0f);
+                    } else {
+                        LOG_WARN("Application: Transform manager not available, model positioned at origin");
+                    }
+                } else {
+                    LOG_ERROR("Application: Failed to create model '{}' from mesh '{}'", model_name, mesh_path);
+                }
                 
                 load_state_ = LoadState::kFinished;
                 
@@ -383,6 +407,7 @@ void Application::check_pending_model_load() {
         // Clear the task a
         pending_model_task_.reset();
         current_loading_model_name_.clear();
+        current_loading_model_path_.clear();
         last_progress_set_ = -1.0f;  // Reset progress tracking
     }
 }
@@ -424,43 +449,7 @@ std::vector<std::string> Application::get_material_names() const {
     return resource_manager_->get_cached_resource_names<Material>();
 }
 
-bool Application::assemble_and_add_model_to_scene(const std::string& meshPath, 
-                                           const std::string& materialPath,
-                                           const std::string& modelId) {
-    if (!resource_manager_) {
-        LOG_ERROR("Application: CoroutineResourceManager not initialized");
-        return false;
-    }
-    
-    LOG_INFO("Application: Assembling model '{}' from mesh '{}' and material '{}'", 
-             modelId, meshPath, materialPath);
-    
-    try {
-        // First assemble the model
-        auto model = resource_manager_->assemble_model(meshPath, materialPath);
-        if (!model) {
-            LOG_ERROR("Application: Failed to assemble model '{}'", modelId);
-            return false;
-        }
-        
-        std::string generatedModelId = meshPath + "|" + materialPath;
-        scene_->add_model_reference(generatedModelId);
-        
-        // Set up rotation animation for cube models
-        ObjectTransformSystem* transform_system = input_manager_->get_transform_system();
-        if (transform_system && meshPath.find("cube") != std::string::npos) {
-            transform_system->set_rotation_animation(generatedModelId, true, glm::vec3(0.5f, 0.3f, 0.0f));
-            LOG_INFO("Application: Enabled rotation animation for cube model '{}'", generatedModelId);
-        }
-        
-        LOG_INFO("Application: Model '{}' successfully added to scene", modelId);
-        return true;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Application: Exception while assembling model '{}': {}", modelId, e.what());
-        return false;
-    }
-}
+
 
 bool Application::add_light_to_scene(const std::string& lightId, 
                                  const std::string& lightType,

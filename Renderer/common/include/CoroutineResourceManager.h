@@ -51,6 +51,7 @@ public:
     // Model assembling 
     std::shared_ptr<Model> assemble_model(const std::string& mesh_path, const std::string& material_path);
     std::shared_ptr<Model> assumble_model(const Mesh& mesh, const Material& material);
+    std::shared_ptr<Model> create_model_with_default_material(const std::string& mesh_path, const std::string& model_name);
 
 
     // Get Textures from material
@@ -63,6 +64,9 @@ public:
     std::vector<std::shared_ptr<class Light>> get_scene_lights(const class Scene& scene) const;
 
     void store_light_in_cache(const std::string& light_id, std::shared_ptr<class Light> light);
+    void store_material_in_cache(const std::string& material_id, std::shared_ptr<Material> material);
+    void store_model_in_cache(const std::string& model_id, std::shared_ptr<Model> model);
+    void store_mesh_in_cache(const std::string& mesh_id, std::shared_ptr<Mesh> mesh);
 
     std::shared_ptr<class Shader> create_shader(const std::string& shader_name,
                                               const std::string& vertex_path,
@@ -87,6 +91,9 @@ public:
 
     template<typename T>
     std::shared_ptr<T> get(const std::string& path) const;
+    
+    // Specialized get method for models that doesn't normalize composite IDs
+    //std::shared_ptr<Model> get_model(const std::string& model_id) const;
 
     template<typename T>
     void unload(const std::string& path);
@@ -337,7 +344,7 @@ Async::Task<std::shared_ptr<T>> CoroutineResourceManager::load_async(const std::
                                                                    std::function<void(float, const std::string&)> progress_callback,
                                                                    Async::TaskPriority priority) {
     // CRITICAL: This should show up in logs if the function is called!
-            LOG_INFO("load_async template called: {}", path);
+    LOG_INFO("load_async template called: {}", path);
     
     if constexpr (std::is_same_v<T, Mesh>) {
         LOG_INFO("Dispatching to load_mesh_async");

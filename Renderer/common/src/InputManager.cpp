@@ -1,8 +1,11 @@
 #include "InputManager.h"
-#include "DragHandler.h"
+#include "TransformManager.h"
 #include "Transform.h"
 #include "Camera.h"
+#include "Scene.h"
+#include "CoroutineResourceManager.h"
 #include <Logger.h>
+#include <GLFW/glfw3.h>
 #include <imgui.h>
 
 // Forward declaration to avoid header conflicts
@@ -19,6 +22,8 @@ InputManager::InputManager()
       last_drag_x_(0.0f),
       last_drag_y_(0.0f),
       drag_mouse_moved_(false),
+      scene_(nullptr),
+      resource_manager_(nullptr),
       drag_enabled_(true),
       is_dragging_(false) {
 }
@@ -42,42 +47,23 @@ bool InputManager::initialize(GLFWwindow* window, std::unique_ptr<GUI>& gui) {
     return true;
 }
 
-bool InputManager::initialize_drag_system(std::shared_ptr<Camera> camera,
-                                         Scene* scene,
-                                         CoroutineResourceManager* resource_manager) {
+bool InputManager::initialize_transform_system(std::shared_ptr<Camera> camera,
+                                              Scene* scene,
+                                              CoroutineResourceManager* resource_manager) {
     if (!camera || !scene || !resource_manager) {
-        LOG_ERROR("InputManager: Invalid parameters for drag system initialization");
+        LOG_ERROR("InputManager: Invalid parameters for transform system initialization");
         return false;
     }
 
-    // Create drag handler
-    drag_handler_ = std::make_unique<DragHandler>();
-    if (!drag_handler_->initialize(camera, scene, resource_manager)) {
-        LOG_ERROR("InputManager: Failed to initialize drag handler");
-        drag_handler_.reset();
-        return false;
-    }
+    // Store references for drag operations
+    camera_ = camera;
+    scene_ = scene;
+    resource_manager_ = resource_manager;
 
-    // Set up drag callbacks to forward to our callbacks
-    drag_handler_->set_drag_start_callback([this](const std::string& model_id, float screen_x, float screen_y) {
-        if (drag_start_callback_) {
-            drag_start_callback_(model_id, screen_x, screen_y);
-        }
-    });
+    // Create transform manager
+    transform_manager_ = std::make_unique<TransformManager>();
     
-    drag_handler_->set_drag_update_callback([this](const std::string& model_id, float screen_x, float screen_y) {
-        if (drag_update_callback_) {
-            drag_update_callback_(model_id, screen_x, screen_y);
-        }
-    });
-    
-    drag_handler_->set_drag_end_callback([this](const std::string& model_id) {
-        if (drag_end_callback_) {
-            drag_end_callback_(model_id);
-        }
-    });
-    
-    LOG_INFO("InputManager: Drag system initialized successfully");
+    LOG_INFO("InputManager: Transform system initialized successfully");
     return true;
 }
 
@@ -175,13 +161,13 @@ void InputManager::setup_input_callbacks(std::shared_ptr<Camera> camera,
 }
 
 void InputManager::cleanup() {
-    if (drag_handler_) {
-        drag_handler_->cleanup();
-        drag_handler_.reset();
-    }
+    transform_manager_.reset();
     
     window_ = nullptr;
     gui_ = nullptr;
+    camera_.reset();
+    scene_ = nullptr;
+    resource_manager_ = nullptr;
     
     // Clear callbacks
     keyboard_callback_ = nullptr;
@@ -258,18 +244,18 @@ void InputManager::get_cursor_position(double& x, double& y) const {
 
 
 bool InputManager::is_dragging() const {
-    return drag_handler_ ? drag_handler_->is_dragging() : false;
+    return transform_manager_ ? transform_manager_->is_dragging() : false;
 }
 
 Transform InputManager::get_model_transform(const std::string& model_id) const {
-    if (drag_handler_) {
-        return drag_handler_->get_model_transform(model_id);
+    if (transform_manager_) {
+        return transform_manager_->get_transform(model_id);
     }
     return Transform::identity();
 }
 
-ObjectTransformSystem* InputManager::get_transform_system() const {
-    return drag_handler_ ? drag_handler_->get_transform_system() : nullptr;
+TransformManager* InputManager::get_transform_manager() const {
+    return transform_manager_.get();
 }
 
 bool InputManager::is_cursor_in_viewport() const {
@@ -373,7 +359,7 @@ void InputManager::process_mouse_input() {
     }
     
     // Process left mouse button for dragging
-    //process_left_mouse_button();
+    process_left_mouse_button();
 }
 
 void InputManager::handle_key_input(KeyboardInput input, float deltaTime) {
@@ -497,7 +483,7 @@ void InputManager::process_left_mouse_button() {
 }
 
 void InputManager::handle_drag_start(float screen_x, float screen_y) {
-    if (!drag_handler_ || !drag_enabled_) {
+    if (!transform_manager_ || !drag_enabled_ || !camera_ || !scene_ || !resource_manager_) {
         return;
     }
 
@@ -505,16 +491,23 @@ void InputManager::handle_drag_start(float screen_x, float screen_y) {
     int window_width, window_height;
     glfwGetWindowSize(window_, &window_width, &window_height);
     
-    bool started = drag_handler_->start_drag(
+    bool started = transform_manager_->start_drag(
         screen_x, screen_y,
-        static_cast<float>(window_width), static_cast<float>(window_height)
+        static_cast<float>(window_width), static_cast<float>(window_height),
+        *camera_, *scene_, *resource_manager_
     );
     
     is_dragging_ = started;
+    
+    // Call drag start callback if drag started successfully
+    if (started && drag_start_callback_) {
+        const auto& drag_info = transform_manager_->get_drag_info();
+        drag_start_callback_(drag_info.model_id, screen_x, screen_y);
+    }
 }
 
 void InputManager::handle_drag_update(float screen_x, float screen_y) {
-    if (!is_dragging_ || !drag_handler_) {
+    if (!is_dragging_ || !transform_manager_ || !camera_) {
         return;
     }
 
@@ -522,19 +515,35 @@ void InputManager::handle_drag_update(float screen_x, float screen_y) {
     int window_width, window_height;
     glfwGetWindowSize(window_, &window_width, &window_height);
     
-    drag_handler_->update_drag(
+    bool updated = transform_manager_->update_drag(
         screen_x, screen_y,
-        static_cast<float>(window_width), static_cast<float>(window_height)
+        static_cast<float>(window_width), static_cast<float>(window_height),
+        *camera_
     );
+    
+    // Call drag update callback if drag updated successfully
+    if (updated && drag_update_callback_) {
+        const auto& drag_info = transform_manager_->get_drag_info();
+        drag_update_callback_(drag_info.model_id, screen_x, screen_y);
+    }
 }
 
 void InputManager::handle_drag_end() {
-    if (!is_dragging_ || !drag_handler_) {
+    if (!is_dragging_ || !transform_manager_) {
         return;
     }
 
-    drag_handler_->end_drag();
+    // Get drag info before ending drag for callback
+    const auto& drag_info = transform_manager_->get_drag_info();
+    std::string model_id = drag_info.model_id;
+    
+    transform_manager_->end_drag();
     is_dragging_ = false;
+    
+    // Call drag end callback
+    if (drag_end_callback_) {
+        drag_end_callback_(model_id);
+    }
 }
 
 

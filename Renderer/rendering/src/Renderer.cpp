@@ -2,7 +2,7 @@
 #include "Logger.h"
 #include "Camera.h"
 #include "CoroutineResourceManager.h"
-#include "ObjectTransformSystem.h"
+#include "TransformManager.h"
 #include "Light.h"
 #include <iostream>
 #include <vector>
@@ -416,7 +416,7 @@ namespace glRenderer {
     }
 
     void Renderer::render_deferred(const Scene& scene, const Camera& camera, 
-        const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system) {
+        const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
         // Check if scene is empty
         if (scene.is_empty()) {
             LOG_ERROR("Renderer: Scene is empty, skipping deferred rendering");
@@ -426,7 +426,7 @@ namespace glRenderer {
         // Shadow Pass 
         if (shadow_map) {
             //LOG_INFO("Renderer: Rendering shadow pass for deferred rendering");
-            render_shadow_pass_deferred(scene, resource_manager, transform_system);
+            render_shadow_pass_deferred(scene, resource_manager, transform_manager);
         }
         
         // Geometry Pass
@@ -449,7 +449,7 @@ namespace glRenderer {
         
         geometry_shader->set_mat4("view", view);
         geometry_shader->set_mat4("projection", projection);
-        
+
         // TODO: Implement previous frame MVP for motion vectors
         glm::mat4 prevMVP = projection * view; // Simplified for now
         geometry_shader->set_mat4("prevModelViewProjection", prevMVP);
@@ -470,7 +470,7 @@ namespace glRenderer {
             }
             
             // Get transform from external transform system
-            glm::mat4 model_matrix = transform_system.get_model_matrix(model_id);
+            glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
             geometry_shader->set_mat4("model", model_matrix);
             
             // Set material properties
@@ -517,13 +517,19 @@ namespace glRenderer {
 
         if (use_ssgi_) {
             // SSGI-enabled pipeline: Direct lighting -> SSGI -> Skybox -> Composition
+            // LOG_INFO("Renderer: Starting SSGI pipeline - Direct lighting pass");
             render_direct_lighting_pass(scene, camera, resource_manager);
+            
+            // LOG_INFO("Renderer: SSGI compute pass");
             SSGI_render(scene, camera, resource_manager);
             
             // Render skybox to main framebuffer before composition
             glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
            
+            // LOG_INFO("Renderer: SSGI composition pass");
             render_composition_pass(scene, camera, resource_manager);
+            
+            // LOG_INFO("Renderer: Final skybox render");
             render_skybox(camera, resource_manager);
         } else {
             // Traditional deferred lighting
@@ -624,7 +630,7 @@ namespace glRenderer {
         }
 
             // Temporal function
-            render_plane_reflection(scene, camera, resource_manager, transform_system);
+            render_plane_reflection(scene, camera, resource_manager, transform_manager);
         
             // Render light spheres for visualization
             render_light_spheres(scene, camera, resource_manager);
@@ -687,7 +693,7 @@ namespace glRenderer {
     }
     
     
-    void Renderer::render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system) {
+    void Renderer::render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
         // Check if scene is empty
         if (scene.is_empty()) {
             LOG_ERROR("Renderer: Scene is empty, skipping rendering");
@@ -793,7 +799,7 @@ namespace glRenderer {
                     plane_shader->set_float("reflectionStrength", 0.4f);
                     
                     // Get transform and render
-                    glm::mat4 model_matrix = transform_system.get_model_matrix(model_id);
+                    glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
                     plane_shader->set_mat4("model", model_matrix);
                     
                     // Set material properties
@@ -817,7 +823,7 @@ namespace glRenderer {
             } else {
                 // Use default shader for non-plane objects
                 // Get transform from external transform system
-                glm::mat4 model_matrix = transform_system.get_model_matrix(model_id);
+                glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
                 main_shader->set_mat4("model", model_matrix);
                 
                 // Set material properties
@@ -1067,7 +1073,7 @@ namespace glRenderer {
         glDepthMask(GL_TRUE);
     }
     
-    void Renderer::render_shadow_pass_deferred(const Scene& scene, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system) {
+    void Renderer::render_shadow_pass_deferred(const Scene& scene, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
         if (!shadow_map || !shadow_map->get_shadow_shader()) {
             LOG_ERROR("ShadowMap or shadow shader is null!");
             return;
@@ -1101,7 +1107,7 @@ namespace glRenderer {
             }
             
             // Get transform from external transform system
-            glm::mat4 model_matrix = transform_system.get_model_matrix(model_id);
+            glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
             shadow_map->get_shadow_shader()->set_mat4("model", model_matrix);
             
             // Render the mesh for shadow mapping
@@ -1117,7 +1123,7 @@ namespace glRenderer {
     }
 
     void Renderer::render_plane_reflection(const Scene& scene, const Camera& camera, 
-        const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system) {
+        const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
         
         // Find the plane model in the scene
         const auto& model_refs = scene.get_model_references();
@@ -1198,7 +1204,7 @@ namespace glRenderer {
             plane_shader->set_float("reflectionStrength", 0.5f);
             
             // Get transform and set model matrix
-            glm::mat4 model_matrix = transform_system.get_model_matrix(model_id);
+            glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
             plane_shader->set_mat4("model", model_matrix);
             
             // Set material properties
@@ -1305,6 +1311,7 @@ namespace glRenderer {
             return;
         }
 
+        // LOG_DEBUG("Renderer: SSGI compute - processing global illumination");
         // Get required shaders
         auto ssgi_compute_shader = resource_manager.get_shader("ssgi_compute_shader");
         auto ssgi_denoise_shader = resource_manager.get_shader("ssgi_denoise_shader");
@@ -1413,6 +1420,7 @@ namespace glRenderer {
 
     void Renderer::render_direct_lighting_pass(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
         // Render direct lighting to lit_scene_texture_
+        // LOG_DEBUG("Renderer: Direct lighting pass - binding framebuffer and textures");
         glBindFramebuffer(GL_FRAMEBUFFER, ssgi_fbo_);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lit_scene_texture_, 0);
         glViewport(0, 0, width_, height_);
@@ -1505,6 +1513,7 @@ namespace glRenderer {
 
     void Renderer::render_composition_pass(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
         // Final composition pass - render to main framebuffer
+        // LOG_DEBUG("Renderer: Composition pass - combining direct lighting and SSGI");
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
         glViewport(0, 0, width_, height_);
         // Don't clear - skybox is already rendered

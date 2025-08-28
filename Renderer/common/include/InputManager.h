@@ -3,12 +3,14 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <GLFW/glfw3.h>
+
+// Forward declaration for GLFW
+struct GLFWwindow;
 
 // Forward declarations
 class Camera;
 class GUI;
-class DragHandler;
+class TransformManager;
 class Scene;
 class CoroutineResourceManager;
 class Transform;
@@ -60,10 +62,10 @@ public:
     bool initialize(GLFWwindow* window, std::unique_ptr<GUI>& gui);
     void cleanup();
     
-    // Drag system initialization
-    bool initialize_drag_system(std::shared_ptr<Camera> camera,
-                               Scene* scene,
-                               CoroutineResourceManager* resource_manager);
+    // Transform system initialization
+    bool initialize_transform_system(std::shared_ptr<Camera> camera,
+                                    Scene* scene,
+                                    CoroutineResourceManager* resource_manager);
 
     // Input callbacks setup
     void setup_input_callbacks(std::shared_ptr<Camera> camera, 
@@ -84,7 +86,7 @@ public:
     void set_mouse_button_callback(MouseButtonCallback callback);
     void set_window_close_callback(WindowCloseCallback callback);
     
-    // Drag callback registration
+    // Drag callback registration  
     void set_drag_start_callback(DragStartCallback callback);
     void set_drag_update_callback(DragUpdateCallback callback);
     void set_drag_end_callback(DragEndCallback callback);
@@ -106,7 +108,7 @@ public:
     Transform get_model_transform(const std::string& model_id) const;
     
 
-    class ObjectTransformSystem* get_transform_system() const;
+    TransformManager* get_transform_manager() const;
     
     // Public method for GLFW callback
     void handle_mouse_movement_callback(float xPos, float yPos);
@@ -131,8 +133,13 @@ private:
     float last_drag_y_;
     bool drag_mouse_moved_;
     
-    // Drag system
-    std::unique_ptr<DragHandler> drag_handler_;
+    // Transform system
+    std::unique_ptr<TransformManager> transform_manager_;
+    
+    // Scene references for drag operations
+    std::shared_ptr<Camera> camera_;
+    Scene* scene_;
+    CoroutineResourceManager* resource_manager_;
     
     // Drag state
     bool drag_enabled_;

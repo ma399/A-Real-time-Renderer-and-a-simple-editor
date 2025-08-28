@@ -1,17 +1,25 @@
 #include "Mesh.h"
+#include "Logger.h"
 
 Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices)
-    : vertices(vertices), indices(indices) {
-    setup_mesh();
+    : vertices(vertices), indices(indices), vao_(0), vbo_(0), ebo_(0), gl_initialized_(false) {
+   
 }
 
 Mesh::~Mesh() {
-    glDeleteVertexArrays(1, &vao_);
-    glDeleteBuffers(1, &vbo_);
-    glDeleteBuffers(1, &ebo_);
+    if (gl_initialized_) {
+        glDeleteVertexArrays(1, &vao_);
+        glDeleteBuffers(1, &vbo_);
+        glDeleteBuffers(1, &ebo_);
+    }
 }
 
 void Mesh::setup_mesh() {
+    if (gl_initialized_) {
+        LOG_INFO("Mesh::setup_mesh() - Already initialized, VAO: {}", vao_);
+        return; // Already initialized
+    }
+    
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
     glGenBuffers(1, &ebo_);
@@ -41,9 +49,19 @@ void Mesh::setup_mesh() {
     glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, tangent));
 
     glBindVertexArray(0);
+    
+    gl_initialized_ = true;
+
+}
+
+void Mesh::ensure_setup() const {
+    if (!gl_initialized_) {
+        const_cast<Mesh*>(this)->setup_mesh();
+    }
 }
 
 void Mesh::draw() const {
+    ensure_setup();
     glBindVertexArray(vao_);
     glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);

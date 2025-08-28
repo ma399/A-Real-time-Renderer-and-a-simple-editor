@@ -17,7 +17,7 @@
 #include <Scene.h>
 
 // Forward declarations
-class ObjectTransformSystem;
+class TransformManager;
 
 namespace glRenderer {
     class Renderer {
@@ -46,7 +46,7 @@ namespace glRenderer {
 
         
         // Render with external transform system
-        void render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const class ObjectTransformSystem& transform_system);
+        void render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager);
         
         // Scene validation and debugging
         bool validate_scene_resources(const Scene& scene, CoroutineResourceManager& resource_manager) const;
@@ -55,7 +55,7 @@ namespace glRenderer {
         void set_deferred_rendering(bool enable);
         bool is_deferred_rendering_enabled() const { return use_deferred_rendering_; }
         void render_deferred(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager);
-        void render_deferred(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system);
+        void render_deferred(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager);
         
         // G-Buffer debug visualization
         void render_gbuffer_debug(int debug_mode, const CoroutineResourceManager& resource_manager);
@@ -69,7 +69,7 @@ namespace glRenderer {
 
         
         // Plane reflection rendering
-        void render_plane_reflection(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system);
+        void render_plane_reflection(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager);
         
         // SSGI rendering
         void SSGI_render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager);
@@ -124,7 +124,7 @@ namespace glRenderer {
         
         // Shadow mapping
         void render_shadow_pass();
-        void render_shadow_pass_deferred(const Scene& scene, const CoroutineResourceManager& resource_manager, const ObjectTransformSystem& transform_system);
+        void render_shadow_pass_deferred(const Scene& scene, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager);
                 
         // Framebuffer methods
         void setup_framebuffer();

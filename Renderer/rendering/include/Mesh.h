@@ -20,8 +20,10 @@ public:
     ~Mesh();
 
     void draw() const;
-    void setup_mesh();      
+    void setup_mesh();
+    void ensure_setup() const; // Ensure OpenGL buffers are initialized
     inline bool empty() const { return vertices.empty(); };
+    inline bool is_setup() const { return gl_initialized_; };
     
     // Accessors 
     const std::vector<Vertex>& get_vertices() const { return vertices; }
@@ -33,5 +35,6 @@ private:
     std::vector<Vertex> vertices;
     std::vector<unsigned int> indices;
     
-    unsigned int vao_, vbo_, ebo_;
+    mutable unsigned int vao_ = 0, vbo_ = 0, ebo_ = 0;
+    mutable bool gl_initialized_ = false;
 }; 

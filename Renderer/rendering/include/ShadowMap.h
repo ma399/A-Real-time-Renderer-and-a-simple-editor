@@ -13,8 +13,7 @@ public:
 
     bool initialize(int width, int height);
     
-    void cleanup();
-    
+    void cleanup();    
     
     GLuint get_depth_texture() const { return depth_texture_; }
     
@@ -26,14 +25,11 @@ public:
     
     void begin_shadow_pass();
     void end_shadow_pass();
-    
-    void prepare_mesh_for_shadow_pass(GLuint mesh_vao, GLuint mesh_vbo, size_t vertex_count);
-    
+     
     Shader* get_shadow_shader() const { return shadow_shader_.get(); }
     
     glm::mat4 get_light_space_matrix(const glm::vec3& light_direction, const glm::vec3& shadow_center) const;
     
-    void debug_print_depth_texture(int sample_x = 256, int sample_y = 256) const;
 
 private:
     GLuint framebuffer_;

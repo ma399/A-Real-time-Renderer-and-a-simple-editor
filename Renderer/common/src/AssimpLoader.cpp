@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <filesystem>
+#include <vector>
+#include <string>
 
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -29,6 +31,7 @@ void AssimpLoader::load_model(const std::string& filePath, std::vector<Mesh::Ver
         aiProcess_Triangulate |           // Convert polygons to triangles
         aiProcess_FlipUVs |              // Flip UV coordinates (OpenGL convention)
         aiProcess_GenSmoothNormals |     // Generate smooth normals if missing
+        aiProcess_CalcTangentSpace |     // Generate tangent and bitangent vectors
         aiProcess_JoinIdenticalVertices | // Remove duplicate vertices
         aiProcess_ImproveCacheLocality |  // Optimize vertex cache locality
         aiProcess_RemoveRedundantMaterials | // Remove redundant materials
@@ -106,7 +109,12 @@ void AssimpLoader::process_mesh(aiMesh* mesh, const aiScene*, std::vector<Mesh::
                 mesh->mTextureCoords[0][i].y
             );
         } else {
-            vertex.texCoords = glm::vec2(0.0f, 0.0f);  // Default UV
+            // Generate basic UV coordinates based on vertex position
+            // This is a simple planar mapping for models without UV
+            vertex.texCoords = glm::vec2(
+                (vertex.position.x + 1.0f) * 0.5f,  // Map X from [-1,1] to [0,1]
+                (vertex.position.y + 1.0f) * 0.5f   // Map Y from [-1,1] to [0,1]
+            );
         }
         
         // Tangent
@@ -123,7 +131,7 @@ void AssimpLoader::process_mesh(aiMesh* mesh, const aiScene*, std::vector<Mesh::
         vertices.emplace_back(std::move(vertex));
     }
 
-    auto vertex_offset = static_cast<unsigned int>(vertices.size());
+    auto vertex_offset = static_cast<unsigned int>(vertices.size() - mesh->mNumVertices);
     
     // Process faces to extract indices
     for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
