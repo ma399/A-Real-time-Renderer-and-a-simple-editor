@@ -12,6 +12,9 @@ uniform sampler2D gNormalRoughness; // Normal (xyz) + Roughness (a)
 uniform sampler2D gMotionAO;      // Motion Vector (xy) + AO (z) + unused (w)
 uniform sampler2D gDepth;         // Depth buffer
 
+// Hi-Z Buffer (Depth Pyramid) for accelerated ray marching
+uniform sampler2D hizTexture;     // Hi-Z pyramid texture
+
 // Direct lighting texture (from lighting pass)
 uniform sampler2D litSceneTexture;
 
@@ -55,25 +58,27 @@ vec3 generateHemisphereSample(vec2 xi, vec3 normal) {
     return tangent * localSample.x + bitangent * localSample.y + normal * localSample.z;
 }
 
-// Screen space ray marching
-vec3 screenSpaceRayMarch(vec3 rayOrigin, vec3 rayDir, out bool hit) {
+// Hi-Z accelerated screen space ray marching
+vec3 screenSpaceRayMarchHiZ(vec3 rayOrigin, vec3 rayDir, out bool hit) {
     hit = false;
     
-    // Transform to view space
+    // Step 1: Begin stepping - Transform to view space
     vec4 viewOrigin = view * vec4(rayOrigin, 1.0);
     vec4 viewDir = view * vec4(rayDir, 0.0);
     
-    vec3 rayStep = normalize(viewDir.xyz) * stepSize;
+    vec3 rayDirection = normalize(viewDir.xyz);
     vec3 currentPos = viewOrigin.xyz;
+    float t = 0.0;
+    const float tMax = maxDistance;
+    const int maxMipLevel = 4;
     
-    for (int i = 0; i < maxSteps; i++) {
-        currentPos += rayStep;
-        
-        // Project to screen space
+    // Ray marching loop
+    for (int i = 0; i < maxSteps && t < tMax; i++) {
+        // Step 2: Determine current region - Project current ray position to screen space
         vec4 projPos = projection * vec4(currentPos, 1.0);
-        projPos.xyz /= projPos.w;
+        if (projPos.w <= 0.0) break;  // Behind camera
         
-        // Convert to texture coordinates
+        projPos.xyz /= projPos.w;
         vec2 screenUV = projPos.xy * 0.5 + 0.5;
         
         // Check bounds
@@ -81,24 +86,48 @@ vec3 screenSpaceRayMarch(vec3 rayOrigin, vec3 rayDir, out bool hit) {
             break;
         }
         
-        // Sample depth buffer
-        float sampledDepth = texture(gDepth, screenUV).r;
+        // Step 3: Query pyramid - Select appropriate mip level based on step distance
+        // Farther distances can use lower mip levels (larger sampling range)
+        int mipLevel = clamp(int(log2(max(1.0, t / (stepSize * 2.0)))), 0, maxMipLevel);
         
-        // Convert to view space depth
-        vec4 ndcPos = vec4(projPos.xy, sampledDepth * 2.0 - 1.0, 1.0);
-        vec4 viewSampledPos = invProjection * ndcPos;
-        viewSampledPos /= viewSampledPos.w;
+        // Sample Hi-Z pyramid at selected mip level
+        float hizDepth = textureLod(hizTexture, screenUV, float(mipLevel)).r;
         
-        // Check intersection
-        float depthDiff = currentPos.z - viewSampledPos.z;
-        if (depthDiff > 0.0 && depthDiff < thickness) {
-            hit = true;
-            return vec3(screenUV, sampledDepth);
-        }
+        // Convert current ray position to depth for comparison
+        float rayDepth = projPos.z * 0.5 + 0.5;  // Convert NDC to [0,1] depth
         
-        // Early exit if too far
-        if (length(currentPos - viewOrigin.xyz) > maxDistance) {
-            break;
+        // Step 4: Perform comparison - Compare ray depth with Hi-Z sampled depth
+        // Step 5: Make decision based on comparison result
+        if (rayDepth < hizDepth) {
+            // Ray depth < region max depth: entire region is "empty"
+            // Safe to perform large step jump, skip empty space efficiently
+            float jumpDistance = stepSize * pow(2.0, float(mipLevel));
+            t += jumpDistance;
+            currentPos = viewOrigin.xyz + rayDirection * t;
+        } else {
+            // Ray depth > region max depth: ray has entered region with potential geometry
+            if (mipLevel == 0) {
+                // Already at highest resolution, perform precise detection
+                float actualDepth = texture(gDepth, screenUV).r;
+                float ndcDepth = actualDepth * 2.0 - 1.0;
+                float viewSampledZ = -projection[3][2] / (ndcDepth + projection[2][2]);
+                
+                float depthDiff = currentPos.z - viewSampledZ;
+                if (depthDiff > 0.0 && depthDiff < thickness) {
+                    // Found intersection
+                    hit = true;
+                    return vec3(screenUV, actualDepth);
+                } else {
+                    // No intersection, take small step forward
+                    t += stepSize * 0.5;
+                    currentPos = viewOrigin.xyz + rayDirection * t;
+                }
+            } else {
+                // Lower mip level (switch to higher resolution depth map) or switch back to original depth map (Mip0)
+                // Use very fine small steps to precisely find intersection points
+                t += stepSize * 0.25;  // Very small step for precision
+                currentPos = viewOrigin.xyz + rayDirection * t;
+            }
         }
     }
     
@@ -127,7 +156,8 @@ void main() {
     float metallic = albedoMetallic.a;
     vec3 normal = normalize(normalRoughness.xyz * 2.0 - 1.0);
     float roughness = normalRoughness.a;
-    float ao = motionAO.z;
+    // float ao = motionAO.z;
+    float ao = 1.0;
     
     // Skip background pixels
     if (positionData.w < 0.5) {
@@ -152,9 +182,9 @@ void main() {
         
         vec3 sampleDir = generateHemisphereSample(xi, normal);
         
-        // Perform screen space ray march
+        // Perform Hi-Z accelerated screen space ray march
         bool hit;
-        vec3 hitResult = screenSpaceRayMarch(worldPos, sampleDir, hit);
+        vec3 hitResult = screenSpaceRayMarchHiZ(worldPos, sampleDir, hit);
         
         if (hit) {
             vec2 hitUV = hitResult.xy;
@@ -175,6 +205,9 @@ void main() {
     // Normalize and apply intensity
     if (totalWeight > 0.0) {
         indirectColor = (indirectColor / totalWeight) * intensity * ao;
+    } else {
+        // Fallback: small ambient contribution if no indirect lighting found
+        indirectColor = albedo * 0.02 * ao; // Very small ambient
     }
     
     // Store result

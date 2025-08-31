@@ -5,8 +5,10 @@ in vec2 TexCoords;
 
 // Input textures
 uniform sampler2D ssgi_raw_texture;    // Raw noisy SSGI
+uniform sampler2D ssgi_prev_texture;   // Previous frame SSGI for temporal accumulation
 uniform sampler2D gPosition;           // World Position for depth comparison
 uniform sampler2D gNormalRoughness;    // Normal for edge detection
+uniform sampler2D gMotionAO;           // Motion vectors (xy) + AO (z)
 uniform sampler2D gDepth;              // Depth buffer
 
 // Denoising parameters
@@ -15,6 +17,11 @@ uniform float normalSigma;
 uniform float depthSigma;
 uniform int filterRadius;
 uniform bool enableTemporalFilter;
+
+// Temporal accumulation parameters
+uniform float temporalAlpha;        // Blend factor for temporal accumulation (0.0-1.0)
+uniform float maxTemporalWeight;    // Maximum weight for temporal sample
+uniform bool isFirstFrame;          // Flag to skip temporal accumulation on first frame
 
 // Screen dimensions
 uniform vec2 screenSize;
@@ -141,11 +148,50 @@ vec3 atrousFilter(vec2 uv, int stepSize) {
     }
 }
 
-// Temporal filter 
+// Temporal filter with motion vector reprojection
 vec3 temporalFilter(vec2 uv, vec3 currentColor) {
-    // For now, just return current color
-    // In a full implementation, this would blend with previous frame
-    return currentColor;
+    // Skip temporal accumulation on first frame
+    if (isFirstFrame) {
+        return currentColor;
+    }
+    
+    // Sample motion vector from G-Buffer
+    vec2 motionVector = texture(gMotionAO, uv).xy;
+    
+    // Calculate previous frame UV coordinates
+    vec2 prevUV = uv - motionVector;
+    
+    // Check if previous UV is within screen bounds
+    if (prevUV.x < 0.0 || prevUV.x > 1.0 || prevUV.y < 0.0 || prevUV.y > 1.0) {
+        return currentColor;
+    }
+    
+    // Sample previous frame SSGI
+    vec3 prevColor = texture(ssgi_prev_texture, prevUV).rgb;
+    
+    // Sample current and previous frame geometry data for validation
+    vec3 currentNormal = normalize(texture(gNormalRoughness, uv).xyz * 2.0 - 1.0);
+    float currentDepth = texture(gDepth, uv).r;
+    
+    vec3 prevNormal = normalize(texture(gNormalRoughness, prevUV).xyz * 2.0 - 1.0);
+    float prevDepth = texture(gDepth, prevUV).r;
+    
+    // Calculate temporal weight based on geometry similarity
+    float normalSimilarity = max(dot(currentNormal, prevNormal), 0.0);
+    float depthSimilarity = 1.0 - abs(currentDepth - prevDepth);
+    
+    // Combine similarity factors
+    float temporalWeight = normalSimilarity * depthSimilarity;
+    temporalWeight = clamp(temporalWeight, 0.0, maxTemporalWeight);
+    
+    // Apply exponential moving average with adaptive weight
+    float alpha = temporalAlpha * temporalWeight;
+    vec3 temporalColor = mix(currentColor, prevColor, alpha);
+    
+    // Clamp to prevent fireflies and maintain energy conservation
+    temporalColor = clamp(temporalColor, 0.0, max(length(currentColor), length(prevColor)) * 1.2);
+    
+    return temporalColor;
 }
 
 void main() {
@@ -163,7 +209,7 @@ void main() {
     
     // Apply A-Trous filter for additional smoothing
     // You can adjust the step size for different levels of denoising
-    denoisedColor = atrousFilter(uv, 1);
+    // denoisedColor = atrousFilter(uv, 1);
     
     // Apply temporal filter if enabled
     if (enableTemporalFilter) {

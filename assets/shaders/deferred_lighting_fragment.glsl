@@ -11,6 +11,8 @@ uniform sampler2D gMotionAO;      // Motion Vector (xy) + AO (z) + unused (w)
 uniform sampler2D gEmissive;      // Emissive Color (rgb) + intensity (a)
 uniform sampler2D gDepth;         // Depth buffer
 
+
+
 // Shadow map
 uniform sampler2D shadowMap;
 uniform bool enableShadows;
@@ -224,13 +226,6 @@ float calculateAttenuation(int lightType, vec3 lightPos, vec3 fragPos, float lig
 
 void main()
 {
-    // DEBUG: Test if shader is executing
-    // FragColor = vec4(1.0, 0.0, 1.0, 1.0); // Magenta test
-    // return;
-    
-    // DEBUG: Show number of lights as color
-    // FragColor = vec4(float(numLights) / 8.0, 0.0, 0.0, 1.0); // Red intensity = number of lights
-    // return;
     
     // Sample G-Buffer
     vec4 gPos = texture(gPosition, TexCoords);
@@ -251,6 +246,8 @@ void main()
     float ao = gMotionAOData.z;        // AO from RT3.z
     vec3 emissiveColor = gEmissiveData.rgb;  // Emissive color from RT4.rgb
     float emissiveIntensity = gEmissiveData.a;  // Emissive intensity from RT4.a
+    
+
     
     // View direction
     vec3 V = normalize(viewPos - WorldPos);
@@ -329,11 +326,6 @@ void main()
     if (useIBL) {
         // Use precomputed irradiance map for diffuse IBL
         vec3 irradiance = texture(irradianceMap, N).rgb;
-        
-        // Debug: Ensure irradiance has some minimum value
-        if (length(irradiance) < 0.01) {
-            irradiance = vec3(0.1, 0.1, 0.1); 
-        }
         
         vec3 diffuse_ambient = irradiance * albedo;
         

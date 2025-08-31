@@ -49,25 +49,31 @@ RaycastHit RaycastUtils::raycast_scene(const Ray& ray,
     RaycastHit closest_hit;
     closest_hit.distance = max_distance;
 
-    // Get all models in the scene
-    auto models = resource_manager.get_scene_models(scene);
-    const auto& model_refs = scene.get_model_references();
+    // Get all renderables in the scene
+    auto renderables = resource_manager.get_scene_renderables(scene);
+    const auto& renderable_refs = scene.get_renderable_references();
     
-    LOG_DEBUG("RaycastUtils: Testing ray against {} models", models.size());
+    LOG_DEBUG("RaycastUtils: Testing ray against {} renderables", renderables.size());
 
-    for (size_t i = 0; i < models.size() && i < model_refs.size(); ++i) {
-        const auto& model = models[i];
-        if (!model || !model->has_mesh()) continue;
+    for (size_t i = 0; i < renderables.size() && i < renderable_refs.size(); ++i) {
+        const auto& renderable = renderables[i];
+        if (!renderable || !renderable->is_visible() || !renderable->has_models()) continue;
 
-        const std::string& model_id = model_refs[i];
+        const std::string& renderable_id = renderable_refs[i];
         
-        // Get the actual transform matrix for this model
-        glm::mat4 model_matrix = get_transform_callback ? get_transform_callback(model_id) : glm::mat4(1.0f);
+        // Get the actual transform matrix for this renderable
+        glm::mat4 renderable_matrix = get_transform_callback ? get_transform_callback(renderable_id) : glm::mat4(1.0f);
         
-        RaycastHit hit;
-        if (ray_mesh_intersect(ray, *model->get_mesh(), model_matrix, model_id, hit)) {
-            if (hit.distance < closest_hit.distance) {
-                closest_hit = hit;
+        // Test each model in the renderable
+        for (const auto& model_id : renderable->get_model_ids()) {
+            auto model = resource_manager.get<Model>(model_id);
+            if (!model || !model->has_mesh()) continue;
+            
+            RaycastHit hit;
+            if (ray_mesh_intersect(ray, *model->get_mesh(), renderable_matrix, renderable_id, hit)) {
+                if (hit.distance < closest_hit.distance) {
+                    closest_hit = hit;
+                }
             }
         }
     }

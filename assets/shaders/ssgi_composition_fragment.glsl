@@ -12,6 +12,10 @@ uniform sampler2D gNormalRoughness;    // Normal for environment reflection
 uniform sampler2D gEmissive;           // Emissive color
 uniform sampler2D gMotionAO;           // AO factor
 
+// SSAO texture
+uniform sampler2D ssaoTexture;         // Screen-space ambient occlusion
+uniform bool enableSSAO;
+
 // Environment lighting
 uniform samplerCube irradianceMap;
 uniform samplerCube skyboxTexture;
@@ -58,6 +62,13 @@ void main() {
     vec3 emissiveColor = emissiveData.rgb * emissiveData.a;
     float ao = motionAO.z;
     
+    // Apply SSAO if enabled
+    if (enableSSAO) {
+        float ssao = texture(ssaoTexture, uv).r;
+        // Multiply material AO with SSAO
+        ao = ao * ssao;
+    }
+    
     // Sample lighting textures
     vec3 directLighting = texture(litSceneTexture, uv).rgb;
     vec3 indirectLighting = vec3(0.0);
@@ -94,17 +105,17 @@ void main() {
         // Simplified specular ambient (could be enhanced with prefiltered environment map)
         vec3 specular_ambient = irradiance * F_ambient * (1.0 - roughness) * 0.5;
         
-        environmentLighting = (kD_ambient * diffuse_ambient + specular_ambient) * ao;
+        environmentLighting = (kD_ambient * diffuse_ambient + specular_ambient);
     } else {
         // Fallback to simple ambient lighting
         vec3 irradiance = ambientLight;
         vec3 diffuse_ambient = irradiance * albedo;
         vec3 specular_ambient = irradiance * F_ambient * (1.0 - roughness);
-        environmentLighting = (kD_ambient * diffuse_ambient + specular_ambient) * ao;
+        environmentLighting = (kD_ambient * diffuse_ambient + specular_ambient);
     }
     
-    // Combine all lighting components
-    vec3 finalColor = directLighting + indirectLighting + environmentLighting + emissiveColor;
+    // Apply AO to lighting components (but not emissive)
+    vec3 finalColor = (directLighting + indirectLighting + environmentLighting) * ao + emissiveColor;
     
     // Ensure minimum visibility
     if (length(finalColor) < 0.1) {

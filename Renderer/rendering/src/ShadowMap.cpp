@@ -2,6 +2,8 @@
 #include "Shader.h"
 #include <Logger.h>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -50,11 +52,26 @@ bool ShadowMap::initialize(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     
     try {
-        shadow_shader_ = std::make_unique<Shader>("../assets/shaders/shadow_map_vertex.glsl", 
-                                               "../assets/shaders/shadow_map_fragment.glsl");
+        shadow_shader_ = std::make_unique<Shader>();
+        
+        // Read shader files (temporary solution, should use ResourceManager in production)
+        std::ifstream vertex_file("../assets/shaders/shadow_map_vertex.glsl");
+        std::ifstream fragment_file("../assets/shaders/shadow_map_fragment.glsl");
+        
+        if (!vertex_file.is_open() || !fragment_file.is_open()) {
+            throw std::runtime_error("Failed to open shader files");
+        }
+        
+        std::stringstream vertex_stream, fragment_stream;
+        vertex_stream << vertex_file.rdbuf();
+        fragment_stream << fragment_file.rdbuf();
+        
+        shadow_shader_->attach_shader(vertex_stream.str(), GL_VERTEX_SHADER)
+                      .attach_shader(fragment_stream.str(), GL_FRAGMENT_SHADER);
+        shadow_shader_->link_program();
         LOG_INFO("Shadow shader created successfully");
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to create shadow shader: {}");
+        LOG_ERROR("Failed to create shadow shader: {}", e.what());
         cleanup();
         return false;
     }

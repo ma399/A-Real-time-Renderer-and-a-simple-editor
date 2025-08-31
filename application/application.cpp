@@ -1,6 +1,9 @@
 #include <stdexcept>
 #include <filesystem>
+#include <string>
 #include <Application.h>
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
 #include <CoroutineThreadPoolScheduler.h>
 #include <Model.h>
 #include <Material.h>
@@ -31,6 +34,9 @@ bool Application::initialize(){
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        
+        // Enable OpenGL debug context
+        glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
         GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor();
         const GLFWvidmode* mode = glfwGetVideoMode(primaryMonitor);
@@ -39,6 +45,8 @@ bool Application::initialize(){
         height_ = static_cast<int>(mode->height * 2.0 / 3.0);
 
         window_ = std::make_unique<Window>(width_, height_, title_.c_str());
+
+        
         camera_ = std::make_shared<Camera>();
         // Initialize GUI
         ui_ = std::make_unique<GUI>();
@@ -61,8 +69,8 @@ bool Application::initialize(){
 
         auto tempScene = std::make_unique<Scene>();
         renderer_ = std::make_unique<glRenderer::Renderer>(
-            width_,
-            height_
+            viewport_width_,
+            viewport_height_
         );
         
         renderer_->initialize();
@@ -137,6 +145,8 @@ bool Application::initialize(){
             [this]() -> std::vector<std::string> { return this->get_model_names(); },
             [this]() -> std::vector<std::string> { return this->get_material_names(); }
         );
+
+        setup_opengl_debug_output();
 
         initialized_ = true;
         return true;
@@ -254,7 +264,7 @@ void Application::request_model_load(const std::string& filePath) {
     
     std::filesystem::path path(filePath);
     current_loading_model_name_ = path.filename().string();
-    current_loading_model_path_ = filePath;  // Store the full file path
+    current_loading_model_path_ = filePath;
     if (ui_) {
         ui_->set_model_loading_progress(current_loading_model_name_, 0.1f, "Starting load...");
     }
@@ -276,7 +286,8 @@ void Application::request_model_load(const std::string& filePath) {
         }
     };
 
-    pending_model_task_ = resource_manager_->load_async<Mesh>(filePath, progressCallback, Async::TaskPriority::k_normal);
+    // Use the new texture loading method instead of just loading mesh
+    pending_model_with_textures_task_ = resource_manager_->load_model_with_textures_async(filePath, progressCallback, Async::TaskPriority::k_normal);
     load_state_ = LoadState::kLoading;
     last_progress_set_ = -1.0f;  // Reset progress tracking
 }
@@ -289,6 +300,7 @@ void Application::on_viewport_resize(int width, int height) {
     viewport_width_ = width;
     viewport_height_ = height;
 
+    // Update both framebuffer and viewport dimensions
     renderer_->resize_framebuffer(width, height);
        
     LOG_INFO("Viewport resized: {}x{}", width, height);
@@ -321,6 +333,13 @@ void Application::setup_event_handlers() {
 }
 
 void Application::check_pending_model_load() {
+    // Check for new texture-enabled model loading first
+    if (pending_model_with_textures_task_.has_value()) {
+        check_pending_model_with_textures_load();
+        return;
+    }
+    
+    // Fallback to legacy mesh-only loading
     if (!pending_model_task_.has_value()) {
         if (load_state_ == LoadState::kLoading) {
             load_state_ = LoadState::kIdle;
@@ -350,9 +369,9 @@ void Application::check_pending_model_load() {
                     // CRITICAL: Force mesh setup in main thread to ensure VAO is initialized
                     auto mesh = assembled_model->get_mesh();
                     
-                    // Simply get the assembled model from ResourceManager and add to scene
-                    scene_->add_model_reference(model_name);
-                    LOG_INFO("Application: Added model '{}' to scene", model_name);
+                    // TODO: Convert to Renderable system
+                    // scene_->add_renderable_reference(model_name);
+                    LOG_INFO("Application: Model '{}' loaded (legacy system - TODO: convert to Renderable)", model_name);
                     // Set position to top-left corner of screen
                     TransformManager* transform_manager = input_manager_->get_transform_manager();
                     if (transform_manager) {
@@ -409,6 +428,85 @@ void Application::check_pending_model_load() {
         current_loading_model_name_.clear();
         current_loading_model_path_.clear();
         last_progress_set_ = -1.0f;  // Reset progress tracking
+    }
+}
+
+// OpenGL debug callback function
+void GLAPIENTRY opengl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
+                                     GLsizei length, const GLchar* message, const void* userParam) {
+    // Filter out non-significant error/warning codes
+    if (id == 131169 || id == 131185 || id == 131218 || id == 131204) return;
+
+    std::string source_str;
+    switch (source) {
+        case GL_DEBUG_SOURCE_API:             source_str = "API"; break;
+        case GL_DEBUG_SOURCE_WINDOW_SYSTEM:   source_str = "Window System"; break;
+        case GL_DEBUG_SOURCE_SHADER_COMPILER: source_str = "Shader Compiler"; break;
+        case GL_DEBUG_SOURCE_THIRD_PARTY:     source_str = "Third Party"; break;
+        case GL_DEBUG_SOURCE_APPLICATION:     source_str = "Application"; break;
+        case GL_DEBUG_SOURCE_OTHER:           source_str = "Other"; break;
+        default:                              source_str = "Unknown"; break;
+    }
+
+    std::string type_str;
+    switch (type) {
+        case GL_DEBUG_TYPE_ERROR:               type_str = "Error"; break;
+        case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR: type_str = "Deprecated Behaviour"; break;
+        case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR:  type_str = "Undefined Behaviour"; break;
+        case GL_DEBUG_TYPE_PORTABILITY:         type_str = "Portability"; break;
+        case GL_DEBUG_TYPE_PERFORMANCE:         type_str = "Performance"; break;
+        case GL_DEBUG_TYPE_MARKER:              type_str = "Marker"; break;
+        case GL_DEBUG_TYPE_PUSH_GROUP:          type_str = "Push Group"; break;
+        case GL_DEBUG_TYPE_POP_GROUP:           type_str = "Pop Group"; break;
+        case GL_DEBUG_TYPE_OTHER:               type_str = "Other"; break;
+        default:                                type_str = "Unknown"; break;
+    }
+
+    // Log based on severity
+    switch (severity) {
+        case GL_DEBUG_SEVERITY_HIGH:
+            LOG_ERROR("OpenGL [{}] [{}] ({}): {}", source_str, type_str, id, message);
+            break;
+        case GL_DEBUG_SEVERITY_MEDIUM:
+            LOG_WARN("OpenGL [{}] [{}] ({}): {}", source_str, type_str, id, message);
+            break;
+        case GL_DEBUG_SEVERITY_LOW:
+            LOG_INFO("OpenGL [{}] [{}] ({}): {}", source_str, type_str, id, message);
+            break;
+        case GL_DEBUG_SEVERITY_NOTIFICATION:
+            LOG_DEBUG("OpenGL [{}] [{}] ({}): {}", source_str, type_str, id, message);
+            break;
+        default:
+            LOG_INFO("OpenGL [{}] [{}] ({}): {}", source_str, type_str, id, message);
+            break;
+    }
+}
+
+void Application::setup_opengl_debug_output() {
+    // Make sure we have a valid OpenGL context
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        LOG_ERROR("Application: Failed to initialize GLAD for debug output");
+        return;
+    }
+
+    // Check if debug output is supported
+    GLint flags;
+    glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
+    if (flags & GL_CONTEXT_FLAG_DEBUG_BIT) {
+        // Enable debug output
+        glEnable(GL_DEBUG_OUTPUT);
+        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS); // Makes sure errors are displayed synchronously
+        glDebugMessageCallback(opengl_debug_callback, nullptr);
+        
+        // Control which messages are displayed
+        glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+        
+        // Optionally disable notifications for less spam
+        glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE);
+        
+        LOG_INFO("Application: OpenGL debug output enabled");
+    } else {
+        LOG_WARN("Application: OpenGL debug context not available");
     }
 }
 
@@ -494,9 +592,141 @@ bool Application::add_light_to_scene(const std::string& lightId,
 
 
 void Application::clear_scene() {
-    scene_->clear_model_references();
+    scene_->clear_renderable_references();
     scene_->clear_light_references();
     LOG_INFO("Application: Scene cleared");
+}
+
+void Application::check_pending_model_with_textures_load() {
+    if (!pending_model_with_textures_task_.has_value()) {
+        if (load_state_ == LoadState::kLoading) {
+            load_state_ = LoadState::kIdle;
+        }
+        return;
+    }
+    
+    auto& task = pending_model_with_textures_task_.value();
+       
+    // Check if the task is ready (non-blocking)
+    if (task.is_ready()) {
+        LOG_INFO("Application: Pending model with textures task is READY, processing result");
+        try {
+            auto model_data = task.try_get();
+            
+            if (model_data.has_value() && !model_data.value().meshes.empty()) {
+                const LoadedModelData& data = model_data.value();
+                
+                // Calculate total vertices for logging
+                size_t total_vertices = 0;
+                for (const auto& mesh_data : data.meshes) {
+                    total_vertices += mesh_data.vertices.size();
+                }
+                
+                LOG_INFO("Application: Model with textures loaded successfully - {} meshes with {} total vertices, {} materials, {} textures", 
+                        data.meshes.size(), total_vertices, data.materials.size(), data.texture_paths.size());
+
+                // Create Renderable with multiple Models
+                auto renderable = std::make_shared<Renderable>(current_loading_model_name_);
+                
+                // Let ResourceManager handle all texture loading first
+                resource_manager_->load_model_textures(data.texture_paths);
+                
+                // Create individual Models for each mesh
+                for (size_t i = 0; i < data.meshes.size(); ++i) {
+                    const auto& mesh_data = data.meshes[i];
+                    
+                    // Create mesh
+                    auto mesh = std::make_shared<Mesh>(mesh_data.vertices, mesh_data.indices);
+                    std::string mesh_id = current_loading_model_name_ + "_mesh_" + std::to_string(i);
+                    resource_manager_->store_mesh_in_cache(mesh_id, mesh);
+                    
+                    // Get corresponding material
+                    std::shared_ptr<Material> material;
+                    if (mesh_data.material_index < data.materials.size()) {
+                        material = std::make_shared<Material>(data.materials[mesh_data.material_index]);
+                        std::string material_id = current_loading_model_name_ + "_material_" + std::to_string(mesh_data.material_index);
+                        resource_manager_->store_material_in_cache(material_id, material);
+                    } else {
+                        material = std::make_shared<Material>(Material::create_pbr_default());
+                        std::string material_id = current_loading_model_name_ + "_default_material_" + std::to_string(i);
+                        resource_manager_->store_material_in_cache(material_id, material);
+                    }
+                    
+                    // Create Model
+                    auto model = std::make_shared<Model>(mesh.get(), material.get());
+                    std::string model_id = current_loading_model_name_ + "_model_" + std::to_string(i);
+                    resource_manager_->store_model_in_cache(model_id, model);
+                    
+                    // Add Model to Renderable
+                    renderable->add_model(model_id);
+                    
+                    LOG_DEBUG("Application: Created model '{}' for mesh '{}' with material index {}", 
+                             model_id, mesh_data.name, mesh_data.material_index);
+                }
+                
+                LOG_INFO("Application: Created Renderable '{}' with {} models from {} meshes", 
+                        current_loading_model_name_, data.meshes.size(), data.meshes.size());
+                
+                // Store Renderable in cache
+                resource_manager_->store_renderable_in_cache(current_loading_model_name_, renderable);
+                
+                // Add Renderable to scene
+                scene_->add_renderable_reference(current_loading_model_name_);
+                LOG_INFO("Application: Added Renderable '{}' to scene", current_loading_model_name_);
+                
+                // Set position and transform for the Renderable
+                TransformManager* transform_manager = input_manager_->get_transform_manager();
+                if (transform_manager) {
+                    glm::vec3 center_position(0.0f, 0.0f, -1.5f);
+                    
+                    Transform renderable_transform;
+                    renderable_transform.set_position(center_position);
+                    renderable_transform.set_scale(0.001f); 
+                    
+                    transform_manager->set_transform(current_loading_model_name_, renderable_transform);
+                    
+                    LOG_INFO("Application: Set transform for Renderable '{}' at position ({}, {}, {}) with scale {}", 
+                            current_loading_model_name_, center_position.x, center_position.y, center_position.z, 0.1f);
+                } else {
+                    LOG_WARN("Application: Transform manager not available, Renderable positioned at origin");
+                }
+                
+                load_state_ = LoadState::kFinished;
+                
+                if (ui_) {
+                    ui_->set_model_loading_finished(current_loading_model_name_);
+                }
+            } else {
+                LOG_ERROR("Application: Failed to load model with textures or model is empty");
+                load_state_ = LoadState::kFailed;
+                
+                // Show error in inline progress
+                if (ui_) {
+                    ui_->set_model_loading_error(current_loading_model_name_, "Failed to load model with textures or model is empty");
+                }
+                
+                // Reset to idle after error display
+                load_state_ = LoadState::kIdle;
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("Application: Exception during model with textures loading: {}", e.what());
+            load_state_ = LoadState::kFailed;
+            
+            // Show exception error in inline progress
+            if (ui_) {
+                ui_->set_model_loading_error(current_loading_model_name_, "Exception: " + std::string(e.what()));
+            }
+            
+            // Reset to idle after error display
+            load_state_ = LoadState::kIdle;
+        }
+        
+        // Clear the task
+        pending_model_with_textures_task_.reset();
+        current_loading_model_name_.clear();
+        current_loading_model_path_.clear();
+        last_progress_set_ = -1.0f;  // Reset progress tracking
+    }
 }
 
 

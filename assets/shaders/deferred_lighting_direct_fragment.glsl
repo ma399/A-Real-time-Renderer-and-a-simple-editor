@@ -11,6 +11,8 @@ uniform sampler2D gMotionAO;      // Motion Vector (xy) + AO (z) + unused (w)
 uniform sampler2D gEmissive;      // Emissive Color (rgb) + intensity (a)
 uniform sampler2D gDepth;         // Depth buffer
 
+
+
 // Shadow map
 uniform sampler2D shadowMap;
 uniform bool enableShadows;
@@ -22,7 +24,6 @@ uniform mat4 view;
 uniform mat4 projection;
 
 // Lighting
-uniform vec3 ambientLight;
 uniform int numLights;
 
 // Light arrays (max 8 lights)
@@ -199,10 +200,10 @@ void main()
     vec4 emissiveData = texture(gEmissive, TexCoords);
     
     // Skip background pixels
-    if (positionData.w < 0.5) {
-        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
+    // if (positionData.w < 0.5) {
+    //     FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    //     return;
+    // }
     
     // Extract data
     vec3 WorldPos = positionData.xyz;
@@ -212,6 +213,8 @@ void main()
     float roughness = normalRoughness.a;
     float ao = motionAO.z;
     vec3 emissiveColor = emissiveData.rgb * emissiveData.a;
+    
+
     
     vec3 N = normal;
     vec3 V = normalize(viewPos - WorldPos);
@@ -280,7 +283,7 @@ void main()
         Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow;
     }
     
-    // ONLY direct lighting + emissive 
+    // Output direct lighting 
     vec3 color = Lo + emissiveColor;
     
     // Output direct lighting 

@@ -13,6 +13,7 @@
 - **Assimp** - 3D 模型加载
 - **ImGui** - 即时模式图形用户界面
 - **STB** - 图像加载库
+- **TinyEXR** - EXR/HDR 图像格式加载库
 - **spdlog** - 高性能日志库
 
 所有依赖库通过 CMake 的 FetchContent 自动下载和构建，无需手动安装。
@@ -165,13 +166,17 @@ classDiagram
 
     %% Scene Management
     class Scene {
-        -vector model_references_
+        -vector renderable_references_
         -vector light_references_
         -vec3 ambient_light_
-        +add_model_reference(id) void
+        +add_renderable_reference(id) void
+        +remove_renderable_reference(id) void
         +add_light_reference(id) void
-        +get_model_references() vector
+        +remove_light_reference(id) void
+        +get_renderable_references() vector
         +get_light_references() vector
+        +get_renderable_count() size_t
+        +get_light_count() size_t
         +is_empty() bool
     }
 
@@ -181,6 +186,7 @@ classDiagram
         -unordered_map texture_cache_
         -unordered_map material_cache_
         -unordered_map model_cache_
+        -unordered_map renderable_cache_
         -unordered_map light_cache_
         -unordered_map shader_cache_
         -CoroutineThreadPoolScheduler scheduler_
@@ -189,8 +195,9 @@ classDiagram
         +load_async(path, callback, priority) Task
         +assemble_model(mesh_path, material_path) shared_ptr
         +create_shader(name, vertex, fragment) shared_ptr
-        +get_scene_models(scene) vector
+        +get_scene_renderables(scene) vector
         +get_scene_lights(scene) vector
+        +store_renderable_in_cache(id, renderable) void
     }
 
     %% Coroutine Threading System
@@ -219,6 +226,24 @@ classDiagram
     }
 
     %% Graphics Resources
+    class Renderable {
+        -string id_
+        -vector model_ids_
+        -bool visible_
+        -string material_override_
+        +add_model(model_id) void
+        +remove_model(model_id) void
+        +get_model_ids() vector
+        +has_models() bool
+        +set_visible(visible) void
+        +is_visible() bool
+        +set_material_override(material_id) void
+        +clear_material_override() void
+        +get_material_override() string
+        +has_material_override() bool
+        +get_id() string
+    }
+
     class Model {
         -Mesh* mesh_
         -Material* material_
@@ -395,6 +420,7 @@ classDiagram
 
     CoroutineResourceManager --> CoroutineThreadPoolScheduler : uses
     CoroutineResourceManager --> AssimpLoader : contains
+    CoroutineResourceManager --> Renderable : manages
     CoroutineResourceManager --> Model : manages
     CoroutineResourceManager --> Texture : manages
     CoroutineResourceManager --> Material : manages
@@ -403,10 +429,11 @@ classDiagram
 
     CoroutineThreadPoolScheduler --> EnhancedThreadPool : contains
 
+    Renderable --> Model : references
     Model --> Mesh : contains
     Model --> Material : contains
 
-    Scene --> Model : references
+    Scene --> Renderable : references
     Scene --> Light : references
 
     InputManager --> Camera : controls
@@ -425,6 +452,6 @@ classDiagram
 
 1. **应用层**: 负责整体应用生命周期管理和用户交互
 2. **渲染核心**: 实现现代图形渲染管线，支持延迟渲染和全局光照
-3. **资源管理**: 基于协程的异步资源加载和缓存系统
-4. **图形资源**: 封装OpenGL对象，提供类型安全的接口（部分实现）
+3. **资源管理**: 基于协程的异步资源加载和缓存系统，管理可渲染对象、模型、材质等资源
+4. **图形资源**: 封装OpenGL对象，提供类型安全的接口。Renderable类作为场景中可渲染对象的抽象，可包含多个模型并支持可见性控制和材质覆盖
 5. **输入输出**: 处理用户输入和GUI界面渲染

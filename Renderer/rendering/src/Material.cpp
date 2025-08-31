@@ -218,7 +218,8 @@ const std::string& Material::get_texture_path(const std::string& name) const {
     if (it != namedTexturePaths.end()) {
         return it->second;
     }
-    return "";
+    static const std::string empty_string;
+    return empty_string;
 }
 
 void Material::clear_all_textures() {
@@ -360,11 +361,11 @@ void Material::syncPBRTextures() {
 Material Material::create_pbr_default() {
     Material material;
     material.set_pbr_enabled(true);
-    material.set_albedo(glm::vec3(0.8f, 0.8f, 0.8f));
+    material.set_albedo(glm::vec3(0.5f, 0.8f, 0.1f));
     material.set_metallic(0.0f);
-    material.set_roughness(0.5f);
+    material.set_roughness(0.7f);
     material.set_ao(1.0f);
-    material.set_emissive(glm::vec3(0.0f, 0.0f, 0.0f));
+    material.set_emissive(glm::vec3(0.1f, 0.3f, 0.1f));
     return material;
 }
 
@@ -480,94 +481,45 @@ void Material::set_shader_pbr(const Shader& shader, const std::string& prefix) c
     shader.set_bool("hasEmissiveTexture", has_emissive_texture());
 }
 
-void Material::bind_textures(const Shader& shader, const CoroutineResourceManager& resource_manager) const {
+// Simplified automatic texture binding using Texture's built-in slot management
+void Material::bind_textures_auto(const Shader& shader, const CoroutineResourceManager& resource_manager) const {
     // Get material textures from resource manager
     auto material_textures = const_cast<CoroutineResourceManager&>(resource_manager).get_material_textures(*this);
     
-    // Define texture binding configuration
+    // Define standard texture binding configuration
     struct TextureBinding {
         std::string texture_name;
-        std::string uniform_name;
-        unsigned int slot;
+        std::vector<std::string> uniform_names;
         bool (Material::*has_texture_func)() const;
     };
     
-    // Configure texture bindings - slots can be easily modified here
+    // Configure standard texture bindings - each texture can have multiple uniform names
     const std::vector<TextureBinding> bindings = {
-        {"diffuse", "albedoTexture", 0, &Material::has_diffuse_texture},
-        {"diffuse", "diffuseTexture", 0, &Material::has_diffuse_texture}, // Same texture, different uniform name
-        {"normal", "normalTexture", 1, &Material::has_normal_texture},
-        {"metallic", "metallicTexture", 2, &Material::has_metallic_texture},
-        {"roughness", "roughnessTexture", 3, &Material::has_roughness_texture},
-        {"ao", "aoTexture", 4, &Material::has_ao_texture},
-        {"emissive", "emissiveTexture", 5, &Material::has_emissive_texture},
-        {"specular", "specularTexture", 6, &Material::has_specular_texture}
+        {"diffuse", {"diffuseTexture", "albedoTexture"}, &Material::has_diffuse_texture},
+        {"normal", {"normalTexture"}, &Material::has_normal_texture},
+        {"metallic", {"metallicTexture"}, &Material::has_metallic_texture},
+        {"roughness", {"roughnessTexture"}, &Material::has_roughness_texture},
+        {"ao", {"aoTexture"}, &Material::has_ao_texture},
+        {"emissive", {"emissiveTexture"}, &Material::has_emissive_texture},
+        {"specular", {"specularTexture"}, &Material::has_specular_texture}
     };
     
-    // Track which textures have been bound to avoid duplicate bindings
-    std::unordered_set<std::string> bound_textures;
-    
-    // Bind textures according to configuration
+    // Bind textures using automatic slot allocation
     for (const auto& binding : bindings) {
-        // Check if material has this texture type
         if ((this->*binding.has_texture_func)()) {
             auto texture_it = material_textures.find(binding.texture_name);
             if (texture_it != material_textures.end()) {
-                // Only bind the texture once per slot
-                if (bound_textures.find(binding.texture_name) == bound_textures.end()) {
-                    texture_it->second->bind(binding.slot);
-                    bound_textures.insert(binding.texture_name);
+                // Use automatic slot allocation
+                unsigned int slot = texture_it->second->bind_auto();
+                if (slot != Texture::INVALID_SLOT) {
+                    // Set all uniform names to the same slot
+                    for (const auto& uniform_name : binding.uniform_names) {
+                        shader.set_int(uniform_name, slot);
+                    }
                 }
-                // Set the uniform (multiple uniforms can point to the same texture)
-                shader.set_int(binding.uniform_name, binding.slot);
             }
         }
     }
 }
 
-void Material::bind_textures(const Shader& shader, const CoroutineResourceManager& resource_manager, 
-                            const std::unordered_map<std::string, unsigned int>& texture_slots) const {
-    // Get material textures from resource manager
-    auto material_textures = const_cast<CoroutineResourceManager&>(resource_manager).get_material_textures(*this);
-    
-    // Define texture binding configuration with custom slots
-    struct TextureBinding {
-        std::string texture_name;
-        std::string uniform_name;
-        bool (Material::*has_texture_func)() const;
-    };
-    
-    // Configure texture bindings with uniform names
-    const std::vector<TextureBinding> bindings = {
-        {"diffuse", "albedoTexture", &Material::has_diffuse_texture},
-        {"diffuse", "diffuseTexture", &Material::has_diffuse_texture}, // Same texture, different uniform name
-        {"normal", "normalTexture", &Material::has_normal_texture},
-        {"metallic", "metallicTexture", &Material::has_metallic_texture},
-        {"roughness", "roughnessTexture", &Material::has_roughness_texture},
-        {"ao", "aoTexture", &Material::has_ao_texture},
-        {"emissive", "emissiveTexture", &Material::has_emissive_texture},
-        {"specular", "specularTexture", &Material::has_specular_texture}
-    };
-    
-    // Track which textures have been bound to avoid duplicate bindings
-    std::unordered_set<std::string> bound_textures;
-    
-    // Bind textures according to configuration and custom slots
-    for (const auto& binding : bindings) {
-        // Check if material has this texture type
-        if ((this->*binding.has_texture_func)()) {
-            auto texture_it = material_textures.find(binding.texture_name);
-            auto slot_it = texture_slots.find(binding.texture_name);
-            
-            if (texture_it != material_textures.end() && slot_it != texture_slots.end()) {
-                // Only bind the texture once per slot
-                if (bound_textures.find(binding.texture_name) == bound_textures.end()) {
-                    texture_it->second->bind(slot_it->second);
-                    bound_textures.insert(binding.texture_name);
-                }
-                // Set the uniform (multiple uniforms can point to the same texture)
-                shader.set_int(binding.uniform_name, slot_it->second);
-            }
-        }
-    }
-} 
+ 

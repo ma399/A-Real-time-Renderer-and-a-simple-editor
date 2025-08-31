@@ -146,11 +146,19 @@ namespace Async {
         void await_suspend(std::coroutine_handle<> handle);
         
         ResultType await_resume() {
+            Logger::get_instance().debug("SubmitToThreadPoolAwaiter::await_resume called");
             if (exception_ptr_) {
+                Logger::get_instance().debug("SubmitToThreadPoolAwaiter: Rethrowing exception");
                 std::rethrow_exception(exception_ptr_);
             }
             if constexpr (!std::is_void_v<ResultType>) {
-                return std::move(result_.value());
+                if (result_.has_value()) {
+                    Logger::get_instance().debug("SubmitToThreadPoolAwaiter: Returning result");
+                    return std::move(result_.value());
+                } else {
+                    Logger::get_instance().error("SubmitToThreadPoolAwaiter: No result available - this is the bug!");
+                    throw std::runtime_error("SubmitToThreadPoolAwaiter: No result available");
+                }
             }
         }
         
@@ -245,6 +253,7 @@ namespace Async {
 
         // Global instance access
         static CoroutineThreadPoolScheduler& get_instance();
+        static std::shared_ptr<CoroutineThreadPoolScheduler> get_shared_instance();
 
         // Friend declarations for awaiter access
         friend class ContextSwitchAwaiter;

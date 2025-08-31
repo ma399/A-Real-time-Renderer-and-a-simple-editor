@@ -4,8 +4,10 @@
 #include "CoroutineResourceManager.h"
 #include "TransformManager.h"
 #include "Light.h"
+#include "Texture.h"
 #include <iostream>
 #include <vector>
+#include <random>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -18,29 +20,43 @@ namespace glRenderer {
     ): 
        width_(width),
        height_(height),
+       viewport_width_(width),
+       viewport_height_(height),
        framebuffer_(0),
-       color_texture_(0),
-       depth_texture_(0),
+       color_texture_(nullptr),
+       depth_texture_(nullptr),
        use_framebuffer_(false),
        g_buffer_fbo_(0),
-       g_position_texture_(0),
-       g_albedo_metallic_texture_(0),
-       g_normal_roughness_texture_(0),
-       g_motion_ao_texture_(0),
-       g_emissive_texture_(0),
-       g_depth_texture_(0),
+       g_position_texture_(nullptr),
+       g_albedo_metallic_texture_(nullptr),
+       g_normal_roughness_texture_(nullptr),
+       g_motion_ao_texture_(nullptr),
+       g_emissive_texture_(nullptr),
+       g_depth_texture_(nullptr),
        use_deferred_rendering_(false),
        shadow_light_pos_(-2.0f, 4.0f, -1.0f),
        shadow_light_target_(0.0f, 0.0f, 0.0f),
-       screen_quad_vao_(0),
-       screen_quad_vbo_(0),
+       last_light_space_matrix_(1.0f),
+       screen_quad_mesh_(nullptr),
        skybox_vao_(0),
        skybox_vbo_(0),
+       ssao_fbo_(0),
+       ssao_raw_texture_(nullptr),
+       ssao_final_texture_(nullptr),
+       ssao_noise_texture_(nullptr),
+       use_ssao_(false),
        ssgi_fbo_(0),
-       ssgi_raw_texture_(0),
-       ssgi_final_texture_(0),
-       lit_scene_texture_(0),
-       use_ssgi_(false)
+       ssgi_raw_texture_(nullptr),
+       ssgi_final_texture_(nullptr),
+       ssgi_prev_texture_(nullptr),
+       lit_scene_texture_(nullptr),
+       use_ssgi_(false),
+       hiz_textures_{0, 0},
+       final_hiz_texture_(0),
+       hiz_mip_levels_(0),
+       prev_view_matrix_(1.0f),
+       prev_projection_matrix_(1.0f),
+       first_frame_(true)
     {
     }
 
@@ -49,7 +65,9 @@ namespace glRenderer {
         cleanup_g_buffer();
         cleanup_screen_quad();
         cleanup_skybox();
+        cleanup_ssao();
         cleanup_ssgi();
+        cleanup_hiz_buffer();
     }
 
     void Renderer::initialize() {
@@ -57,12 +75,12 @@ namespace glRenderer {
             throw std::runtime_error("Failed to initialize GLAD");
         }
 
-        glViewport(0, 0, width_, height_);
+        glViewport(0, 0, viewport_width_, viewport_height_);
         glEnable(GL_DEPTH_TEST);
         
         glDisable(GL_CULL_FACE);
 
-
+        // All texture slot management is now handled automatically by the Texture class
 
         
         shadow_map = std::make_unique<ShadowMap>();
@@ -76,60 +94,31 @@ namespace glRenderer {
 
         setup_framebuffer();
         setup_g_buffer();
-        setup_screen_quad();
+        // setup_screen_quad(); // Moved to lazy initialization in render methods
         setup_skybox();
+        setup_ssao();
         setup_ssgi();
+        setup_hiz_buffer();
 
     }
   
-    void Renderer::setup_framebuffer() {
+        void Renderer::setup_framebuffer() {
         
         glGenFramebuffers(1, &framebuffer_);
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
 
-        //color texture
-        glGenTextures(1, &color_texture_);
-        glBindTexture(GL_TEXTURE_2D, color_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width_, height_, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture_, 0);
+        // Create color texture using factory method
+        color_texture_ = std::make_unique<Texture>(Texture::create_render_target(viewport_width_, viewport_height_, false));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture_->get_id(), 0);
         
-        //depth texture
-        glGenTextures(1, &depth_texture_);
-        glBindTexture(GL_TEXTURE_2D, depth_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, width_, height_, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
- 
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture_, 0);
+        // Create depth texture using factory method
+        depth_texture_ = std::make_unique<Texture>(Texture::create_depth_buffer(viewport_width_, viewport_height_));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture_->get_id(), 0);
 
-        GLenum framebuffer_Status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        if (framebuffer_Status != GL_FRAMEBUFFER_COMPLETE) {
-            LOG_ERROR("ERROR: Framebuffer not complete! Status: {}", framebuffer_Status);
-            switch(framebuffer_Status) {
-                case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT:
-                    LOG_ERROR("  - INCOMPLETE_ATTACHMENT");
-                    break;
-                case GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:
-                    LOG_ERROR("  - MISSING_ATTACHMENT");
-                    break;
-                case GL_FRAMEBUFFER_UNSUPPORTED:
-                    LOG_ERROR("  - UNSUPPORTED");
-                    break;
-                default:
-                    LOG_ERROR("  - Unknown error: {}", framebuffer_Status);
-            }
-        } else {
-            LOG_INFO("Framebuffer is complete! Color texture ID: {}, Depth texture ID: {}", 
-                     color_texture_, depth_texture_);
-        }
-        
         //restore to default
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         
-        LOG_INFO("Framebuffer setup completed: {}x{}", width_, height_);
+        LOG_INFO("Framebuffer setup completed: {}x{}", viewport_width_, viewport_height_);
     }
 
     void Renderer::resize_framebuffer(int newWidth, int newHeight) {
@@ -137,57 +126,61 @@ namespace glRenderer {
             return;
         }
         
+        viewport_width_ = newWidth;
+        viewport_height_ = newHeight;
+        
+        // Also update the stored width and height for consistency
         width_ = newWidth;
         height_ = newHeight;
         
-        // Resize main framebuffer textures
-        glBindTexture(GL_TEXTURE_2D, color_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width_, height_, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        // Resize main framebuffer textures using new resize method
+        if (color_texture_) {
+            color_texture_->resize_texture(viewport_width_, viewport_height_, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE);
+        }
         
-        glBindTexture(GL_TEXTURE_2D, depth_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, width_, height_, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture_, 0);
-
-        // Resize G-Buffer textures
-        if (g_position_texture_ != 0) {
-            glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-            
-            glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_FLOAT, NULL);
-            
-            glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-            
-            glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-            
-            glBindTexture(GL_TEXTURE_2D, g_emissive_texture_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-            
-            glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width_, height_, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        if (depth_texture_) {
+            depth_texture_->resize_texture(viewport_width_, viewport_height_, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, GL_FLOAT);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture_->get_id(), 0);
         }
 
-        LOG_INFO("Framebuffer and G-Buffer resized to: {}x{}", width_, height_);
+        // Resize G-Buffer textures using new resize method
+        if (g_position_texture_) {
+            g_position_texture_->resize_texture(viewport_width_, viewport_height_, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+            g_albedo_metallic_texture_->resize_texture(viewport_width_, viewport_height_, GL_RGBA16F, GL_RGBA, GL_FLOAT);
+            g_normal_roughness_texture_->resize_texture(viewport_width_, viewport_height_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+            g_motion_ao_texture_->resize_texture(viewport_width_, viewport_height_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+            g_emissive_texture_->resize_texture(viewport_width_, viewport_height_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+            g_depth_texture_->resize_texture(viewport_width_, viewport_height_, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT);
+        }
+
+        // Resize SSAO textures if they exist
+        if (ssao_raw_texture_ || ssao_final_texture_) {
+            cleanup_ssao_textures();
+            setup_ssao_textures();
+        }
+        
+        // Resize SSGI textures if they exist
+        if (ssgi_raw_texture_ || ssgi_final_texture_ || lit_scene_texture_) {
+            cleanup_ssgi_textures();
+            setup_ssgi_textures();
+        }
+        
+        // Resize Hi-Z buffer if it exists
+        if (hiz_textures_[0] != 0) {
+            cleanup_hiz_buffer();
+            setup_hiz_buffer();
+        }
+
+        LOG_INFO("Framebuffer, G-Buffer, SSGI textures, and Hi-Z buffer resized to: {}x{}", viewport_width_, viewport_height_);
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
     
     void Renderer::cleanup_framebuffer() {
-        if (color_texture_ != 0) {
-            glDeleteTextures(1, &color_texture_);
-            color_texture_ = 0;
-        }
-        if (depth_texture_ != 0) {
-            glDeleteTextures(1, &depth_texture_);
-            depth_texture_ = 0;
-        }
+        // Texture objects will be automatically cleaned up by their destructors
+        color_texture_.reset();
+        depth_texture_.reset();
+        
         if (framebuffer_ != 0) {
             glDeleteFramebuffers(1, &framebuffer_);
             framebuffer_ = 0;
@@ -199,53 +192,30 @@ namespace glRenderer {
         glGenFramebuffers(1, &g_buffer_fbo_);
         glBindFramebuffer(GL_FRAMEBUFFER, g_buffer_fbo_);
         
-        // RT0: Position  + Material ID
-        glGenTextures(1, &g_position_texture_);
-        glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width_, height_, 0, GL_RGBA, GL_FLOAT, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_position_texture_, 0);
+        // RT0: Position + Material ID using factory method
+        g_position_texture_ = std::make_unique<Texture>(Texture::create_g_buffer_texture(viewport_width_, viewport_height_, GL_RGBA32F, GL_RGBA, GL_FLOAT));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_position_texture_->get_id(), 0);
         
-        // RT1: Position (RGB16F) + Metallic (R16F) - needs float format for position data
-        glGenTextures(1, &g_albedo_metallic_texture_);
-        glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_FLOAT, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, g_albedo_metallic_texture_, 0);
+        // RT1: Albedo (RGB16F) + Metallic (R16F) using factory method
+        g_albedo_metallic_texture_ = std::make_unique<Texture>(Texture::create_g_buffer_texture(viewport_width_, viewport_height_, GL_RGBA16F, GL_RGBA, GL_FLOAT));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, g_albedo_metallic_texture_->get_id(), 0);
         
-        // RT2: Normal (RGB8) + Roughness (R8)
-        glGenTextures(1, &g_normal_roughness_texture_);
-        glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, g_normal_roughness_texture_, 0);
+        // RT2: Normal (RGB8) + Roughness (R8) using factory method
+        g_normal_roughness_texture_ = std::make_unique<Texture>(Texture::create_g_buffer_texture(viewport_width_, viewport_height_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, g_normal_roughness_texture_->get_id(), 0);
         
-        // RT3: Motion Vector (RG8) + AO (R8) + unused (R8)
-        glGenTextures(1, &g_motion_ao_texture_);
-        glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, g_motion_ao_texture_, 0);
+        // RT3: Motion Vector (RG8) + AO (R8) + unused (R8) using factory method
+        g_motion_ao_texture_ = std::make_unique<Texture>(Texture::create_g_buffer_texture(viewport_width_, viewport_height_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, g_motion_ao_texture_->get_id(), 0);
         
-        // RT4: Emissive Color (RGB8) + Intensity (R8)
-        glGenTextures(1, &g_emissive_texture_);
-        glBindTexture(GL_TEXTURE_2D, g_emissive_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, g_emissive_texture_, 0);
+        // RT4: Emissive Color (RGB8) + Intensity (R8) using factory method
+        g_emissive_texture_ = std::make_unique<Texture>(Texture::create_g_buffer_texture(viewport_width_, viewport_height_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE));
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, g_emissive_texture_->get_id(), 0);
         
-        // Depth buffer
-        glGenTextures(1, &g_depth_texture_);
-        glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width_, height_, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_depth_texture_, 0);
+        // Depth buffer using factory method
+        g_depth_texture_ = std::make_unique<Texture>(Texture::create_depth_buffer(viewport_width_, viewport_height_));
+        g_depth_texture_->set_filter_mode(GL_LINEAR, GL_LINEAR); // Override default nearest filtering for depth
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_depth_texture_->get_id(), 0);
         
         // Specify which color attachments we'll use for rendering
         GLenum draw_buffers[5] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4 };
@@ -262,7 +232,7 @@ namespace glRenderer {
         if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
             LOG_ERROR("G-Buffer framebuffer not complete! Status: {}", framebuffer_status);
         } else {
-            LOG_INFO("G-Buffer setup completed: {}x{} with 4 render targets", width_, height_);
+            LOG_INFO("G-Buffer setup completed: {}x{} with 4 render targets", viewport_width_, viewport_height_);
         }
         
         // Unbind framebuffer
@@ -270,30 +240,14 @@ namespace glRenderer {
     }
     
     void Renderer::cleanup_g_buffer() {
-        if (g_position_texture_ != 0) {
-            glDeleteTextures(1, &g_position_texture_);
-            g_position_texture_ = 0;
-        }
-        if (g_albedo_metallic_texture_ != 0) {
-            glDeleteTextures(1, &g_albedo_metallic_texture_);
-            g_albedo_metallic_texture_ = 0;
-        }
-        if (g_normal_roughness_texture_ != 0) {
-            glDeleteTextures(1, &g_normal_roughness_texture_);
-            g_normal_roughness_texture_ = 0;
-        }
-        if (g_motion_ao_texture_ != 0) {
-            glDeleteTextures(1, &g_motion_ao_texture_);
-            g_motion_ao_texture_ = 0;
-        }
-        if (g_emissive_texture_ != 0) {
-            glDeleteTextures(1, &g_emissive_texture_);
-            g_emissive_texture_ = 0;
-        }
-        if (g_depth_texture_ != 0) {
-            glDeleteTextures(1, &g_depth_texture_);
-            g_depth_texture_ = 0;
-        }
+        // Texture objects will be automatically cleaned up by their destructors
+        g_position_texture_.reset();
+        g_albedo_metallic_texture_.reset();
+        g_normal_roughness_texture_.reset();
+        g_motion_ao_texture_.reset();
+        g_emissive_texture_.reset();
+        g_depth_texture_.reset();
+        
         if (g_buffer_fbo_ != 0) {
             glDeleteFramebuffers(1, &g_buffer_fbo_);
             g_buffer_fbo_ = 0;
@@ -305,70 +259,50 @@ namespace glRenderer {
         LOG_INFO("Deferred rendering {}", enable ? "enabled" : "disabled");
     }
     
-    void Renderer::setup_screen_quad() {
-        // Screen-space quad vertices (NDC coordinates)
-        float quadVertices[] = {
-            // positions   // texCoords
-            -1.0f,  1.0f,  0.0f, 1.0f,
-            -1.0f, -1.0f,  0.0f, 0.0f,
-             1.0f, -1.0f,  1.0f, 0.0f,
-            
-            -1.0f,  1.0f,  0.0f, 1.0f,
-             1.0f, -1.0f,  1.0f, 0.0f,
-             1.0f,  1.0f,  1.0f, 1.0f
-        };
+    void Renderer::setup_screen_quad(const CoroutineResourceManager& resource_manager) {
+        // Get or create screen quad mesh from ResourceManager
+        screen_quad_mesh_ = const_cast<CoroutineResourceManager&>(resource_manager).createQuad("screen_quad");
         
-        glGenVertexArrays(1, &screen_quad_vao_);
-        glGenBuffers(1, &screen_quad_vbo_);
+        if (!screen_quad_mesh_) {
+            LOG_ERROR("Renderer: Failed to create screen quad mesh");
+            return;
+        }
         
-        glBindVertexArray(screen_quad_vao_);
-        glBindBuffer(GL_ARRAY_BUFFER, screen_quad_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
-        
-        // Position attribute
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-        
-        // Texture coordinate attribute
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-        
-        glBindVertexArray(0);
-        
-        // LOG_INFO("Screen-space quad setup completed");
+        LOG_DEBUG("Renderer: Screen-space quad setup completed using ResourceManager");
     }
     
     void Renderer::cleanup_screen_quad() {
-        if (screen_quad_vbo_ != 0) {
-            glDeleteBuffers(1, &screen_quad_vbo_);
-            screen_quad_vbo_ = 0;
-        }
-        if (screen_quad_vao_ != 0) {
-            glDeleteVertexArrays(1, &screen_quad_vao_);
-            screen_quad_vao_ = 0;
-        }
+        // Reset the shared_ptr, mesh cleanup is handled by ResourceManager cache
+        screen_quad_mesh_.reset();
+        LOG_DEBUG("Renderer: Screen quad mesh reference cleared");
     }
     
     void Renderer::render_screen_quad() {
-        glBindVertexArray(screen_quad_vao_);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glBindVertexArray(0);
+        if (!screen_quad_mesh_) {
+            LOG_ERROR("Renderer: Screen quad mesh not initialized. Call setup_screen_quad() first.");
+            return;
+        }
+        
+        screen_quad_mesh_->draw();
     }
     
     void Renderer::set_render_to_framebuffer(bool enable) {
         use_framebuffer_ = enable;
         if (enable) {
             glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-            glViewport(0, 0, width_, height_);
+            glViewport(0, 0, viewport_width_, viewport_height_);
         } else {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            glViewport(0, 0, width_, height_);
+            glViewport(0, 0, viewport_width_, viewport_height_);
         }
     }
     
     void Renderer::bind_g_buffer_for_geometry_pass() {
+      // Reset texture slot counter for geometry pass
+      Texture::reset_slot_counter();
+      
       glBindFramebuffer(GL_FRAMEBUFFER, g_buffer_fbo_);
-      glViewport(0, 0, width_, height_);
+      glViewport(0, 0, viewport_width_, viewport_height_);
 
       // Re-specify draw buffers
       GLenum draw_buffers[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
@@ -376,11 +310,13 @@ namespace glRenderer {
 
       // Clear G-Buffer
       glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+      glClearDepth(1.0f);  // Ensure depth is cleared to far plane
       glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-      // Enable depth testing and disable face culling
+      // Enable depth testing and depth writing, disable face culling
       glEnable(GL_DEPTH_TEST);
       glDepthFunc(GL_LESS);
+      glDepthMask(GL_TRUE);  // Ensure depth writing is enabled
       glDisable(GL_CULL_FACE);
       
       // Disable blending for opaque geometry rendering
@@ -390,7 +326,7 @@ namespace glRenderer {
     void Renderer::bind_g_buffer_for_lighting_pass() {
       // Bind default framebuffer for final output
       glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-      glViewport(0, 0, width_, height_);
+      glViewport(0, 0, viewport_width_, viewport_height_);
 
       // Disable depth testing for screen-space quad and ensure face culling is off
       glDisable(GL_DEPTH_TEST);
@@ -400,33 +336,38 @@ namespace glRenderer {
       glEnable(GL_BLEND);
       glBlendFunc(GL_ONE, GL_ONE);
 
-      // Bind G-Buffer textures for reading
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-      glActiveTexture(GL_TEXTURE1);
-      glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-      glActiveTexture(GL_TEXTURE2);
-      glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-      glActiveTexture(GL_TEXTURE3);
-      glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-      glActiveTexture(GL_TEXTURE4);
-      glBindTexture(GL_TEXTURE_2D, g_emissive_texture_);
-      glActiveTexture(GL_TEXTURE5);
-      glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
     }
 
     void Renderer::render_deferred(const Scene& scene, const Camera& camera, 
         const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
+        // Initialize screen quad if not already done
+        //shadow_map = nullptr;
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
         // Check if scene is empty
         if (scene.is_empty()) {
             LOG_ERROR("Renderer: Scene is empty, skipping deferred rendering");
             return;
         }
         
+        // Unbind all textures and reset slot counter for this render pass
+        
+        Texture::reset_slot_counter();
+        
+        // Bind G-Buffer textures for reading using automatic slot management
+        unsigned int g_pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int g_albedo_slot = Texture::bind_raw_texture(g_albedo_metallic_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int g_normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int g_motion_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int g_emissive_slot = Texture::bind_raw_texture(g_emissive_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int g_depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
+        
         // Shadow Pass 
         if (shadow_map) {
             //LOG_INFO("Renderer: Rendering shadow pass for deferred rendering");
-            render_shadow_pass_deferred(scene, resource_manager, transform_manager);
+            render_shadow_pass_deferred(scene, camera, resource_manager, transform_manager);
         }
         
         // Geometry Pass
@@ -444,63 +385,85 @@ namespace glRenderer {
         
         // Set camera matrices
         glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         glm::vec3 camera_pos = camera.get_position();
+        
+        //LOG_INFO("Renderer: Camera position: ({}, {}, {})", camera_pos.x, camera_pos.y, camera_pos.z);
         
         geometry_shader->set_mat4("view", view);
         geometry_shader->set_mat4("projection", projection);
 
-        // TODO: Implement previous frame MVP for motion vectors
-        glm::mat4 prevMVP = projection * view; // Simplified for now
+        // Set previous frame MVP for motion vectors and temporal accumulation
+        glm::mat4 prevMVP;
+        if (first_frame_) {
+            // On first frame, use current matrices to avoid artifacts
+            prevMVP = projection * view;
+            first_frame_ = false;
+        } else {
+            // Use previous frame matrices
+            prevMVP = prev_projection_matrix_ * prev_view_matrix_;
+        }
         geometry_shader->set_mat4("prevModelViewProjection", prevMVP);
         
-        // Render all models to G-Buffer
-        const auto& model_refs = scene.get_model_references();
-        //LOG_INFO("Renderer: Geometry pass rendering {} models", model_refs.size());
+        // Store current matrices for next frame
+        prev_view_matrix_ = view;
+        prev_projection_matrix_ = projection;
         
-        for (const auto& model_id : model_refs) {
-            // Skip plane model in geometry pass - it will be rendered separately with reflection
-            if (model_id == "simple_scene_plane_model") {
-                continue;
-            }
-            
-            auto model = resource_manager.get<Model>(model_id);
-            if (!model || !model->has_mesh() || !model->has_material()) {
+        // Render all renderables to G-Buffer
+        const auto& renderable_refs = scene.get_renderable_references();
+        
+        for (const auto& renderable_id : renderable_refs) {
+            auto renderable = resource_manager.get<Renderable>(renderable_id);
+            if (!renderable || !renderable->is_visible() || !renderable->has_models()) {
                 continue;
             }
             
             // Get transform from external transform system
-            glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
-            geometry_shader->set_mat4("model", model_matrix);
+            glm::mat4 renderable_matrix = transform_manager.get_model_matrix(renderable_id);
             
-            // Set material properties
-            const Material& material = *model->get_material();
+            // Render each model in the renderable
+            for (const auto& model_id : renderable->get_model_ids()) {
+                Texture::reset_slot_counter();
+                auto model = resource_manager.get<Model>(model_id);
+                if (!model || !model->has_mesh() || !model->has_material()) {
+                    continue;
+                }
+                
+                geometry_shader->set_mat4("model", renderable_matrix);
             
-            // Set basic material uniforms
-            material.set_shader(*geometry_shader, "material");
-            
-            // Set PBR material parameters
-            material.set_shader_pbr(*geometry_shader);
-            geometry_shader->set_int("materialID", 0);
-            
-            // Bind material textures
-            material.bind_textures(*geometry_shader, resource_manager);
-            
-            // Render the mesh
-            try {
-                const Mesh& mesh = *model->get_mesh();
-                //LOG_INFO("Renderer: Drawing model '{}' with {} vertices", model_id, mesh.get_vertex_count());
-                mesh.draw();
-                //LOG_INFO("Renderer: Successfully drew model '{}'", model_id);
-            } catch (const std::exception& e) {
-                LOG_ERROR("Renderer: Failed to render model '{}' in geometry pass: {}", model_id, e.what());
-                continue;
+                // Set material properties
+                const Material& material = *model->get_material();
+                
+                // Set basic material uniforms
+                material.set_shader(*geometry_shader, "material");
+                
+                // Set PBR material parameters
+                material.set_shader_pbr(*geometry_shader);
+                geometry_shader->set_int("materialID", 0);
+                
+                // Bind material textures using automatic slot management
+                material.bind_textures_auto(*geometry_shader, resource_manager);
+                
+                // Render the mesh
+                try {
+                    const Mesh& mesh = *model->get_mesh();
+                    mesh.draw();
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Renderer: Failed to render model '{}' in geometry pass: {}", model_id, e.what());
+                    continue;
+                }
             }
         }
         
+        // Ensure G-Buffer writes are complete before generating Hi-Z pyramid
+        glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT);
+        
+        // Generate Hi-Z pyramid after geometry pass for accelerated ray marching
+        generate_hiz_pyramid(resource_manager);
+        
         // Render skybox using G-Buffer depth information
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-        glViewport(0, 0, width_, height_);
+        glViewport(0, 0, viewport_width_, viewport_height_);
         
         // Clear only color buffer, keep depth from G-Buffer
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -509,11 +472,16 @@ namespace glRenderer {
         // Copy depth from G-Buffer to final framebuffer
         glBindFramebuffer(GL_READ_FRAMEBUFFER, g_buffer_fbo_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer_);
-        glBlitFramebuffer(0, 0, width_, height_, 0, 0, width_, height_, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        glBlitFramebuffer(0, 0, viewport_width_, viewport_height_, 0, 0, viewport_width_, viewport_height_, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
         
         // Render skybox with proper depth testing
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
         render_skybox(camera, resource_manager);
+
+        // SSAO pass (if enabled) - runs after G-Buffer generation
+        if (use_ssao_) {
+            SSAO_render(scene, camera, resource_manager);
+        }
 
         if (use_ssgi_) {
             // SSGI-enabled pipeline: Direct lighting -> SSGI -> Skybox -> Composition
@@ -525,12 +493,14 @@ namespace glRenderer {
             
             // Render skybox to main framebuffer before composition
             glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+            render_skybox(camera, resource_manager);
            
             // LOG_INFO("Renderer: SSGI composition pass");
             render_composition_pass(scene, camera, resource_manager);
             
             // LOG_INFO("Renderer: Final skybox render");
-            render_skybox(camera, resource_manager);
+            // Note: Skybox should be rendered before composition, not after
+            // The composition shader will let skybox pixels show through
         } else {
             // Traditional deferred lighting
             bind_g_buffer_for_lighting_pass();
@@ -545,12 +515,15 @@ namespace glRenderer {
             lighting_shader->use();
         
             // Bind G-Buffer textures
-            lighting_shader->set_int("gPosition", 0);
-            lighting_shader->set_int("gAlbedoMetallic", 1);
-            lighting_shader->set_int("gNormalRoughness", 2);
-            lighting_shader->set_int("gMotionAO", 3);
-            lighting_shader->set_int("gEmissive", 4);
-            lighting_shader->set_int("gDepth", 5);
+            // Set G-Buffer texture uniforms using dynamically assigned slots
+            if (g_pos_slot != Texture::INVALID_SLOT) lighting_shader->set_int("gPosition", g_pos_slot);
+            if (g_albedo_slot != Texture::INVALID_SLOT) lighting_shader->set_int("gAlbedoMetallic", g_albedo_slot);
+            if (g_normal_slot != Texture::INVALID_SLOT) lighting_shader->set_int("gNormalRoughness", g_normal_slot);
+            if (g_motion_slot != Texture::INVALID_SLOT) lighting_shader->set_int("gMotionAO", g_motion_slot);
+            if (g_emissive_slot != Texture::INVALID_SLOT) lighting_shader->set_int("gEmissive", g_emissive_slot);
+            if (g_depth_slot != Texture::INVALID_SLOT) lighting_shader->set_int("gDepth", g_depth_slot);
+            
+
         
             // Set camera uniforms
             lighting_shader->set_vec3("viewPos", camera_pos);
@@ -583,13 +556,13 @@ namespace glRenderer {
         
             if (irradiance_map) {
                 lighting_shader->set_bool("useIBL", true);
-                lighting_shader->set_int("irradianceMap", 7);
             
-                // Bind irradiance map
-                glActiveTexture(GL_TEXTURE7);
-                irradiance_map->bind_cube_map(7);
-            
-                LOG_INFO("Renderer: IBL irradiance map bound to texture unit 7 (ID: {})", irradiance_map->get_id());
+                // Bind irradiance map using automatic slot management
+                unsigned int slot = irradiance_map->bind_cubemap_auto();
+                if (slot != Texture::INVALID_SLOT) {
+                    lighting_shader->set_int("irradianceMap", slot);
+                    LOG_INFO("Renderer: IBL irradiance map bound to texture unit {} (ID: {})", slot, irradiance_map->get_id());
+                }
             } else {
                 lighting_shader->set_bool("useIBL", false);
                 LOG_WARN("Renderer: No irradiance map found, using fallback ambient lighting");
@@ -598,12 +571,13 @@ namespace glRenderer {
             // Shadow mapping (if enabled)
             if (shadow_map) {
                 lighting_shader->set_bool("enableShadows", true);
-                lighting_shader->set_int("shadowMap", 6);
             
-                // Bind shadow map texture
-                glActiveTexture(GL_TEXTURE6);
+                // Bind shadow map texture using automatic slot management
                 GLuint shadow_texture_id = shadow_map->get_depth_texture();
-                glBindTexture(GL_TEXTURE_2D, shadow_texture_id);
+                unsigned int shadow_slot = Texture::bind_raw_texture(shadow_texture_id, GL_TEXTURE_2D);
+                if (shadow_slot != Texture::INVALID_SLOT) {
+                    lighting_shader->set_int("shadowMap", shadow_slot);
+                }
             
 
             
@@ -624,22 +598,32 @@ namespace glRenderer {
             // Render screen-space quad
             render_screen_quad();
             
+            // Apply SSAO in a post-processing pass if enabled
+            if (use_ssao_) {
+                apply_ssao_to_framebuffer(scene, camera, resource_manager);
+            }
+            
             // Re-enable depth testing and disable blending for subsequent rendering
             glEnable(GL_DEPTH_TEST);
             glDisable(GL_BLEND);
         }
 
             // Temporal function
-            render_plane_reflection(scene, camera, resource_manager, transform_manager);
+            //render_plane_reflection(scene, camera, resource_manager, transform_manager);
         
             // Render light spheres for visualization
             render_light_spheres(scene, camera, resource_manager);
     }
     
     void Renderer::render_gbuffer_debug(int debug_mode, const CoroutineResourceManager& resource_manager) {
+        // Initialize screen quad if not already done
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
         // Bind final framebuffer for output
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-        glViewport(0, 0, width_, height_);
+        glViewport(0, 0, viewport_width_, viewport_height_);
         
         // Clear framebuffer
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -657,30 +641,20 @@ namespace glRenderer {
         
         debug_shader->use();
         
-        // Bind G-Buffer textures
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-        debug_shader->set_int("gPosition", 0);
+        // Bind G-Buffer textures using automatic slot management
+        unsigned int pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int albedo_slot = Texture::bind_raw_texture(g_albedo_metallic_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int motion_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int emissive_slot = Texture::bind_raw_texture(g_emissive_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
         
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-        debug_shader->set_int("gAlbedoMetallic", 1);
-        
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-        debug_shader->set_int("gNormalRoughness", 2);
-        
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-        debug_shader->set_int("gMotionAO", 3);
-        
-        glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, g_emissive_texture_);
-        debug_shader->set_int("gEmissive", 4);
-        
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
-        debug_shader->set_int("gDepth", 5);
+        if (pos_slot != Texture::INVALID_SLOT) debug_shader->set_int("gPosition", pos_slot);
+        if (albedo_slot != Texture::INVALID_SLOT) debug_shader->set_int("gAlbedoMetallic", albedo_slot);
+        if (normal_slot != Texture::INVALID_SLOT) debug_shader->set_int("gNormalRoughness", normal_slot);
+        if (motion_slot != Texture::INVALID_SLOT) debug_shader->set_int("gMotionAO", motion_slot);
+        if (emissive_slot != Texture::INVALID_SLOT) debug_shader->set_int("gEmissive", emissive_slot);
+        if (depth_slot != Texture::INVALID_SLOT) debug_shader->set_int("gDepth", depth_slot);
         
         // Set debug mode
         debug_shader->set_int("debugMode", debug_mode);
@@ -709,7 +683,7 @@ namespace glRenderer {
 
         // Update camera matrices
         glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         glm::vec3 camera_pos = camera.get_position();
         
         // Get main shader from ResourceManager
@@ -741,10 +715,20 @@ namespace glRenderer {
             }
         }
         
-        // Render all models in the scene
-        const auto& model_refs = scene.get_model_references();
+        // Render all renderables in the scene
+        const auto& renderable_refs = scene.get_renderable_references();
         
-        for (const auto& model_id : model_refs) {
+        for (const auto& renderable_id : renderable_refs) {
+            auto renderable = resource_manager.get<Renderable>(renderable_id);
+            if (!renderable || !renderable->is_visible() || !renderable->has_models()) {
+                continue;
+            }
+            
+            // Get transform from external transform system
+            glm::mat4 renderable_matrix = transform_manager.get_model_matrix(renderable_id);
+            
+            // Render each model in the renderable
+            for (const auto& model_id : renderable->get_model_ids()) {
             // Get model from ResourceManager
             auto model = resource_manager.get<Model>(model_id);
             if (!model) {
@@ -788,11 +772,13 @@ namespace glRenderer {
                         }
                     }
                     
-                    // Bind skybox texture for reflection
+                    // Bind skybox texture for reflection using automatic slot management
                     auto skybox_texture = resource_manager.get<Texture>("skybox_cubemap");
                     if (skybox_texture) {
-                        skybox_texture->bind_cube_map(1);
-                        plane_shader->set_int("skybox", 1);
+                        unsigned int slot = skybox_texture->bind_cubemap_auto();
+                        if (slot != Texture::INVALID_SLOT) {
+                            plane_shader->set_int("skybox", slot);
+                        }
                     }
                     
                     // Set reflection strength (can be adjusted)
@@ -805,6 +791,9 @@ namespace glRenderer {
                     // Set material properties
                     const Material& material = *model->get_material();
                     material.set_shader(*plane_shader, "material");
+                    
+                    // Bind material textures using automatic slot management
+                    material.bind_textures_auto(*plane_shader, resource_manager);
                     
                     // Render the plane mesh
                     try {
@@ -830,6 +819,9 @@ namespace glRenderer {
                 const Material& material = *model->get_material();
                 material.set_shader(*main_shader, "material");
                 
+                // Bind material textures using automatic slot management
+                material.bind_textures_auto(*main_shader, resource_manager);
+                
                 // Render the model's mesh
                 try {
                     const Mesh& mesh = *model->get_mesh();
@@ -839,6 +831,7 @@ namespace glRenderer {
                     continue;
                 }
             }
+        }
          }
          
          // Render skybox as background
@@ -850,29 +843,44 @@ namespace glRenderer {
         
         bool all_valid = true;
         
-        // Validate models
-        const auto& model_refs = scene.get_model_references();
-        LOG_DEBUG("Renderer: Validating {} model references", model_refs.size());
+        // Validate renderables
+        const auto& renderable_refs = scene.get_renderable_references();
+        LOG_DEBUG("Renderer: Validating {} renderable references", renderable_refs.size());
         
-        for (const auto& model_id : model_refs) {
-            auto model = resource_manager.get<Model>(model_id);
-            if (!model) {
-                LOG_ERROR("Renderer: Model '{}' not found in ResourceManager", model_id);
+        for (const auto& renderable_id : renderable_refs) {
+            auto renderable = resource_manager.get<Renderable>(renderable_id);
+            if (!renderable) {
+                LOG_ERROR("Renderer: Renderable '{}' not found in ResourceManager", renderable_id);
                 all_valid = false;
                 continue;
             }
             
-            if (!model->has_mesh()) {
-                LOG_ERROR("Renderer: Model '{}' has no mesh", model_id);
+            if (!renderable->has_models()) {
+                LOG_ERROR("Renderer: Renderable '{}' has no models", renderable_id);
                 all_valid = false;
             }
             
-            if (!model->has_material()) {
-                LOG_ERROR("Renderer: Model '{}' has no material", model_id);
-                all_valid = false;
+            // Validate each model in the renderable
+            for (const auto& model_id : renderable->get_model_ids()) {
+                auto model = resource_manager.get<Model>(model_id);
+                if (!model) {
+                    LOG_ERROR("Renderer: Model '{}' in renderable '{}' not found", model_id, renderable_id);
+                    all_valid = false;
+                    continue;
+                }
+                
+                if (!model->has_mesh()) {
+                    LOG_ERROR("Renderer: Model '{}' in renderable '{}' has no mesh", model_id, renderable_id);
+                    all_valid = false;
+                }
+                
+                if (!model->has_material()) {
+                    LOG_ERROR("Renderer: Model '{}' in renderable '{}' has no material", model_id, renderable_id);
+                    all_valid = false;
+                }
             }
             
-            LOG_DEBUG("Renderer: Model '{}' validation passed", model_id);
+            LOG_DEBUG("Renderer: Renderable '{}' validation passed", renderable_id);
         }
         
         // Validate lights
@@ -923,7 +931,7 @@ namespace glRenderer {
         
         // Set camera matrices
         glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         
         light_shader->set_mat4("view", view);
         light_shader->set_mat4("projection", projection);
@@ -1048,16 +1056,21 @@ namespace glRenderer {
         
         // Remove translation from view matrix 
         glm::mat4 view = glm::mat4(glm::mat3(camera.get_view_matrix()));
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         
         skybox_shader->set_mat4("view", view);
         skybox_shader->set_mat4("projection", projection);
         
-        // Get and bind skybox cubemap texture
+        // Get and bind skybox cubemap texture using automatic slot management
         auto skybox_texture = resource_manager.get<Texture>("skybox_cubemap");
         if (skybox_texture) {
-            skybox_texture->bind_cube_map(0);
-            skybox_shader->set_int("skybox", 0);
+            unsigned int slot = skybox_texture->bind_cubemap_auto();
+            if (slot != Texture::INVALID_SLOT) {
+                skybox_shader->set_int("skybox", slot);
+            } else {
+                LOG_WARN("Renderer: Failed to bind skybox texture");
+                return;
+            }
         } else {
             LOG_WARN("Renderer: Skybox texture not found");
             return;
@@ -1073,66 +1086,137 @@ namespace glRenderer {
         glDepthMask(GL_TRUE);
     }
     
-    void Renderer::render_shadow_pass_deferred(const Scene& scene, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
+    void Renderer::render_shadow_pass_deferred(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
         if (!shadow_map || !shadow_map->get_shadow_shader()) {
             LOG_ERROR("ShadowMap or shadow shader is null!");
             return;
         }
-        
+
         shadow_map->begin_shadow_pass();
         shadow_map->get_shadow_shader()->use();
-        
-        // Use first light as shadow caster if available, otherwise use fixed position
+
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+
         glm::vec3 shadow_light_direction = glm::normalize(shadow_light_pos_);
         auto scene_lights = resource_manager.get_scene_lights(scene);
         if (!scene_lights.empty() && scene_lights[0] && scene_lights[0]->get_type() == Light::Type::kDirectional) {
             shadow_light_direction = scene_lights[0]->get_direction();
         }
+
+        glm::mat4 view = camera.get_view_matrix();
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
+        glm::mat4 invViewProjection = glm::inverse(projection * view);
+
+        std::vector<glm::vec3> frustum_corners_world;
+        glm::vec3 frustum_center_world(0.0f);
+        const std::vector<glm::vec4> frustum_corners_ndc = {
+            glm::vec4(-1.0f, -1.0f, -1.0f, 1.0f), glm::vec4(1.0f, -1.0f, -1.0f, 1.0f),
+            glm::vec4(-1.0f,  1.0f, -1.0f, 1.0f), glm::vec4(1.0f,  1.0f, -1.0f, 1.0f),
+            glm::vec4(-1.0f, -1.0f,  1.0f, 1.0f), glm::vec4(1.0f, -1.0f,  1.0f, 1.0f),
+            glm::vec4(-1.0f,  1.0f,  1.0f, 1.0f), glm::vec4(1.0f,  1.0f,  1.0f, 1.0f)
+        };
+        for (const auto& corner_ndc : frustum_corners_ndc) {
+            glm::vec4 corner_world = invViewProjection * corner_ndc;
+            corner_world /= corner_world.w;
+            frustum_corners_world.push_back(glm::vec3(corner_world));
+            frustum_center_world += glm::vec3(corner_world);
+        }
+        frustum_center_world /= frustum_corners_world.size();
+
         
-        // For directional light shadows, center the shadow map around the scene center
-        // TODO: This should ideally use camera position, but we need to pass it to this function
-        glm::vec3 shadow_center = glm::vec3(0.0f, 0.0f, 0.0f); // Scene center for now
+        glm::mat4 lightViewMatrix = glm::lookAt(
+            frustum_center_world - shadow_light_direction * 50.0f, 
+            frustum_center_world,
+            glm::vec3(0.0f, 1.0f, 0.0f)
+        );
+
+       
+        glm::vec3 min_bounds = glm::vec3(std::numeric_limits<float>::max());
+        glm::vec3 max_bounds = glm::vec3(std::numeric_limits<float>::lowest());
+        for (const auto& corner_world : frustum_corners_world) {
+            glm::vec4 corner_light_space = lightViewMatrix * glm::vec4(corner_world, 1.0f);
+            min_bounds = glm::min(min_bounds, glm::vec3(corner_light_space));
+            max_bounds = glm::max(max_bounds, glm::vec3(corner_light_space));
+        }
+
         
-        // Set light space matrix for shadow mapping
-        glm::mat4 lightSpaceMatrix = shadow_map->get_light_space_matrix(shadow_light_direction, shadow_center);
+        float shadow_map_width = static_cast<float>(shadow_map->get_width());
+        float shadow_map_height = static_cast<float>(shadow_map->get_height());
+        glm::vec2 frustum_size(max_bounds.x - min_bounds.x, max_bounds.y - min_bounds.y);
+        glm::vec2 texel_size(frustum_size.x / shadow_map_width, frustum_size.y / shadow_map_height);
+
+        min_bounds.x = std::floor(min_bounds.x / texel_size.x) * texel_size.x;
+        min_bounds.y = std::floor(min_bounds.y / texel_size.y) * texel_size.y;
+        max_bounds.x = min_bounds.x + frustum_size.x;
+        max_bounds.y = min_bounds.y + frustum_size.y;
+
+ 
+        float z_padding = 100.0f;
+        min_bounds.z -= z_padding;
+        max_bounds.z += z_padding;
+
+        glm::mat4 lightProjection = glm::ortho(
+            min_bounds.x, max_bounds.x,
+            min_bounds.y, max_bounds.y,
+            min_bounds.z, max_bounds.z
+        );
+
+       
+        glm::mat4 lightSpaceMatrix = lightProjection * lightViewMatrix;
+        last_light_space_matrix_ = lightSpaceMatrix;
         shadow_map->get_shadow_shader()->set_mat4("lightSpaceMatrix", lightSpaceMatrix);
-        
-        // Render all models in the scene for shadow mapping
-        const auto& model_refs = scene.get_model_references();
-        
-        for (const auto& model_id : model_refs) {
-            auto model = resource_manager.get<Model>(model_id);
-            if (!model || !model->has_mesh()) {
-                continue;
-            }
-            
-            // Get transform from external transform system
-            glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
-            shadow_map->get_shadow_shader()->set_mat4("model", model_matrix);
-            
-            // Render the mesh for shadow mapping
-            try {
-                const Mesh& mesh = *model->get_mesh();
-                mesh.draw();
-            } catch (const std::exception& e) {
-                LOG_ERROR("Renderer: Failed to render model '{}' in shadow pass: {}", model_id, e.what());
-                continue;
+
+ 
+        const auto& renderable_refs = scene.get_renderable_references();
+        for (const auto& renderable_id : renderable_refs) {
+            auto renderable = resource_manager.get<Renderable>(renderable_id);
+            if (!renderable || !renderable->is_visible() || !renderable->has_models()) { continue; }
+
+            glm::mat4 renderable_matrix = transform_manager.get_model_matrix(renderable_id);
+            for (const auto& model_id : renderable->get_model_ids()) {
+                auto model = resource_manager.get<Model>(model_id);
+                if (!model || !model->has_mesh()) { continue; }
+
+                shadow_map->get_shadow_shader()->set_mat4("model", renderable_matrix);
+                try {
+                    model->get_mesh()->draw();
+                }
+                catch (const std::exception& e) {
+                    LOG_ERROR("Renderer: Failed to render model '{}' in shadow pass: {}", model_id, e.what());
+                    continue;
+                }
             }
         }
+
+        glCullFace(GL_BACK);
+        glDisable(GL_CULL_FACE);
+
         shadow_map->end_shadow_pass();
     }
 
     void Renderer::render_plane_reflection(const Scene& scene, const Camera& camera, 
         const CoroutineResourceManager& resource_manager, const TransformManager& transform_manager) {
-        
-        // Find the plane model in the scene
-        const auto& model_refs = scene.get_model_references();
-        for (const auto& model_id : model_refs) {
-            if (model_id != "simple_scene_plane_model") {
-                continue; // Skip non-plane models
+        // Find the plane renderable in the scene
+        const auto& renderable_refs = scene.get_renderable_references();
+        for (const auto& renderable_id : renderable_refs) {
+            // Check if this is the plane renderable
+            if (renderable_id != "simple_scene_plane_renderable") {
+                continue; // Skip non-plane renderables
             }
             
-            auto model = resource_manager.get<Model>(model_id);
+            auto renderable = resource_manager.get<Renderable>(renderable_id);
+            if (!renderable || !renderable->is_visible() || !renderable->has_models()) {
+                continue;
+            }
+            
+            // Get the first model from the plane renderable
+            const auto& model_ids = renderable->get_model_ids();
+            if (model_ids.empty()) {
+                continue;
+            }
+            
+            auto model = resource_manager.get<Model>(model_ids[0]);
             if (!model || !model->has_mesh() || !model->has_material()) {
                 continue;
             }
@@ -1153,7 +1237,7 @@ namespace glRenderer {
             
             // Set camera matrices
             glm::mat4 view = camera.get_view_matrix();
-            glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+            glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
             glm::vec3 camera_pos = camera.get_position();
             
             plane_shader->set_mat4("view", view);
@@ -1172,21 +1256,27 @@ namespace glRenderer {
                 plane_shader->set_vec3("lightColor", glm::vec3(1.0f, 1.0f, 1.0f));
             }
             
-            // Bind skybox texture for reflection FIRST
+            // Bind skybox texture for reflection using automatic slot management
             auto skybox_texture = resource_manager.get<Texture>("skybox_cubemap");
             if (skybox_texture) {
-                skybox_texture->bind_cube_map(0);  // Use texture unit 0
-                plane_shader->set_int("skybox", 0);
-                //LOG_INFO("Renderer: Skybox texture ID {} bound to unit 0 for plane reflection", skybox_texture->get_id());
+                unsigned int slot = skybox_texture->bind_cubemap_auto();
+                if (slot != Texture::INVALID_SLOT) {
+                    plane_shader->set_int("skybox", slot);
+                    //LOG_INFO("Renderer: Skybox texture ID {} bound to slot {} for plane reflection", skybox_texture->get_id(), slot);
+                } else {
+                    LOG_ERROR("Renderer: Failed to bind skybox texture for plane reflection");
+                }
             } else {
                 LOG_ERROR("Renderer: Skybox texture not found for plane reflection");
             }
             
             // Set shadow mapping uniforms
             if (shadow_map) {
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, shadow_map->get_depth_texture());
-                plane_shader->set_int("shadowMap", 1);
+                GLuint shadow_texture_id = shadow_map->get_depth_texture();
+                unsigned int shadow_slot = Texture::bind_raw_texture(shadow_texture_id, GL_TEXTURE_2D);
+                if (shadow_slot != Texture::INVALID_SLOT) {
+                    plane_shader->set_int("shadowMap", shadow_slot);
+                }
                 plane_shader->set_float("pcfRadius", 1.5f);
                 plane_shader->set_float("lightSize", 5.0f);
                 
@@ -1204,12 +1294,15 @@ namespace glRenderer {
             plane_shader->set_float("reflectionStrength", 0.5f);
             
             // Get transform and set model matrix
-            glm::mat4 model_matrix = transform_manager.get_model_matrix(model_id);
+            glm::mat4 model_matrix = transform_manager.get_model_matrix(renderable_id);
             plane_shader->set_mat4("model", model_matrix);
             
             // Set material properties
             const Material& material = *model->get_material();
             material.set_shader(*plane_shader, "material");
+            
+            // Bind material textures using automatic slot management
+            material.bind_textures_auto(*plane_shader, resource_manager);
             
             // Set object color (for compatibility)
             plane_shader->set_vec3("objectColor", material.get_diffuse());
@@ -1247,35 +1340,20 @@ namespace glRenderer {
         glGenFramebuffers(1, &ssgi_fbo_);
         glBindFramebuffer(GL_FRAMEBUFFER, ssgi_fbo_);
 
-        // Create SSGI raw texture 
-        glGenTextures(1, &ssgi_raw_texture_);
-        glBindTexture(GL_TEXTURE_2D, ssgi_raw_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Create SSGI raw texture using factory method
+        ssgi_raw_texture_ = std::make_unique<Texture>(Texture::create_framebuffer_texture(viewport_width_, viewport_height_, GL_RGBA16F, GL_RGBA, GL_FLOAT));
 
-        // Create SSGI final texture (denoised output)
-        glGenTextures(1, &ssgi_final_texture_);
-        glBindTexture(GL_TEXTURE_2D, ssgi_final_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Create SSGI final texture (denoised output) using factory method
+        ssgi_final_texture_ = std::make_unique<Texture>(Texture::create_framebuffer_texture(viewport_width_, viewport_height_, GL_RGBA16F, GL_RGBA, GL_FLOAT));
 
-        // Create lit scene texture (direct lighting only)
-        glGenTextures(1, &lit_scene_texture_);
-        glBindTexture(GL_TEXTURE_2D, lit_scene_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Create lit scene texture (direct lighting only) using factory method
+        lit_scene_texture_ = std::make_unique<Texture>(Texture::create_framebuffer_texture(viewport_width_, viewport_height_, GL_RGBA16F, GL_RGBA, GL_FLOAT));
+
+        // Create previous frame SSGI texture for temporal accumulation using factory method
+        ssgi_prev_texture_ = std::make_unique<Texture>(Texture::create_framebuffer_texture(viewport_width_, viewport_height_, GL_RGBA16F, GL_RGBA, GL_FLOAT));
 
         // Attach textures to framebuffer 
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssgi_raw_texture_, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssgi_raw_texture_->get_id(), 0);
 
         // Check framebuffer completeness
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
@@ -1283,22 +1361,15 @@ namespace glRenderer {
         }
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        LOG_INFO("SSGI textures setup completed: {}x{}", width_, height_);
+        LOG_INFO("SSGI textures setup completed: {}x{}", viewport_width_, viewport_height_);
     }
 
     void Renderer::cleanup_ssgi_textures() {
-        if (ssgi_raw_texture_ != 0) {
-            glDeleteTextures(1, &ssgi_raw_texture_);
-            ssgi_raw_texture_ = 0;
-        }
-        if (ssgi_final_texture_ != 0) {
-            glDeleteTextures(1, &ssgi_final_texture_);
-            ssgi_final_texture_ = 0;
-        }
-        if (lit_scene_texture_ != 0) {
-            glDeleteTextures(1, &lit_scene_texture_);
-            lit_scene_texture_ = 0;
-        }
+        // Texture objects will be automatically cleaned up by their destructors
+        ssgi_raw_texture_.reset();
+        ssgi_final_texture_.reset();
+        ssgi_prev_texture_.reset();
+        lit_scene_texture_.reset();
     }
 
     void Renderer::set_ssgi_enabled(bool enable) {
@@ -1306,7 +1377,352 @@ namespace glRenderer {
         LOG_INFO("SSGI {}", enable ? "enabled" : "disabled");
     }
 
+    // SSAO Implementation
+    void Renderer::setup_ssao() {
+        setup_ssao_textures();
+        generate_ssao_noise_texture();
+        generate_ssao_sample_kernel();
+        LOG_INFO("SSAO setup completed");
+    }
+
+    void Renderer::cleanup_ssao() {
+        cleanup_ssao_textures();
+        if (ssao_fbo_ != 0) {
+            glDeleteFramebuffers(1, &ssao_fbo_);
+            ssao_fbo_ = 0;
+        }
+        LOG_INFO("SSAO cleanup completed");
+    }
+
+    void Renderer::setup_ssao_textures() {
+        // Generate framebuffer
+        glGenFramebuffers(1, &ssao_fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, ssao_fbo_);
+
+        // Create SSAO raw texture (single channel for AO values) using factory method
+        ssao_raw_texture_ = std::make_unique<Texture>(Texture::create_framebuffer_texture(viewport_width_, viewport_height_, GL_R16F, GL_RED, GL_FLOAT));
+
+        // Create SSAO final texture (blurred output) using factory method
+        ssao_final_texture_ = std::make_unique<Texture>(Texture::create_framebuffer_texture(viewport_width_, viewport_height_, GL_R16F, GL_RED, GL_FLOAT));
+
+        // Attach texture to framebuffer 
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssao_final_texture_->get_id(), 0);
+
+        // Check framebuffer completeness
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            LOG_ERROR("SSAO framebuffer is not complete!");
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        LOG_INFO("SSAO textures setup completed: {}x{}", viewport_width_, viewport_height_);
+    }
+
+    void Renderer::cleanup_ssao_textures() {
+        // Texture objects will be automatically cleaned up by their destructors
+        ssao_raw_texture_.reset();
+        ssao_final_texture_.reset();
+        ssao_noise_texture_.reset();
+    }
+
+    void Renderer::generate_ssao_noise_texture() {
+        // Use the new factory method to create SSAO noise texture
+        ssao_noise_texture_ = std::make_unique<Texture>(Texture::create_ssao_noise_texture());
+        
+        LOG_DEBUG("SSAO noise texture generated using factory method");
+    }
+
+    void Renderer::generate_ssao_sample_kernel() {
+        // Sample kernel is generated and uploaded as uniform in SSAO_render
+        // This method is kept for consistency but actual kernel generation happens in render
+        LOG_DEBUG("SSAO sample kernel generation prepared");
+    }
+
+    void Renderer::set_ssao_enabled(bool enable) {
+        use_ssao_ = enable;
+        LOG_INFO("SSAO {}", enable ? "enabled" : "disabled");
+    }
+
+    void Renderer::apply_ssao_to_framebuffer(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
+        // Initialize screen quad if not already done
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
+        // Get SSAO apply shader
+        auto ssao_apply_shader = resource_manager.get_shader("ssao_apply_shader");
+        if (!ssao_apply_shader) {
+            LOG_ERROR("SSAO apply shader not found in ResourceManager");
+            return;
+        }
+
+        // Create a temporary texture to store current framebuffer content
+        GLuint temp_texture;
+        glGenTextures(1, &temp_texture);
+        glBindTexture(GL_TEXTURE_2D, temp_texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, viewport_width_, viewport_height_, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Copy current framebuffer content to temporary texture
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_);
+        glBindTexture(GL_TEXTURE_2D, temp_texture);
+        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, viewport_width_, viewport_height_, 0);
+
+        // Now render back to framebuffer with SSAO applied
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+        glViewport(0, 0, viewport_width_, viewport_height_);
+        
+        // Disable depth testing for screen-space quad
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+
+        ssao_apply_shader->use();
+        
+        // Bind textures
+        Texture::reset_slot_counter();
+        unsigned int scene_slot = Texture::bind_raw_texture(temp_texture, GL_TEXTURE_2D);
+        unsigned int ssao_slot = Texture::bind_raw_texture(ssao_final_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int motion_ao_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        
+        if (scene_slot != Texture::INVALID_SLOT) ssao_apply_shader->set_int("sceneTexture", scene_slot);
+        if (ssao_slot != Texture::INVALID_SLOT) ssao_apply_shader->set_int("ssaoTexture", ssao_slot);
+        if (motion_ao_slot != Texture::INVALID_SLOT) ssao_apply_shader->set_int("gMotionAO", motion_ao_slot);
+        if (pos_slot != Texture::INVALID_SLOT) ssao_apply_shader->set_int("gPosition", pos_slot);
+
+        // Render screen-space quad
+        render_screen_quad();
+
+        // Clean up temporary texture
+        glDeleteTextures(1, &temp_texture);
+        
+        LOG_DEBUG("SSAO applied to framebuffer");
+    }
+
+    void Renderer::SSAO_render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
+        // Initialize screen quad if not already done
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
+        if (!use_ssao_) {
+            return;
+        }
+
+        // Get required shaders
+        auto ssao_compute_shader = resource_manager.get_shader("ssao_compute_shader");
+        auto ssao_blur_shader = resource_manager.get_shader("ssao_blur_shader");
+        
+        if (!ssao_compute_shader || !ssao_blur_shader) {
+            LOG_ERROR("SSAO shaders not found in ResourceManager");
+            return;
+        }
+
+        // Camera matrices
+        glm::mat4 view = camera.get_view_matrix();
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
+        glm::mat4 invView = glm::inverse(view);
+        glm::mat4 invProjection = glm::inverse(projection);
+        glm::vec3 viewPos = camera.get_position();
+
+        // Generate sample kernel
+        std::vector<glm::vec3> ssaoKernel;
+        std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
+        std::default_random_engine generator;
+        
+        for (unsigned int i = 0; i < 64; ++i) {
+            glm::vec3 sample(
+                randomFloats(generator) * 2.0 - 1.0,
+                randomFloats(generator) * 2.0 - 1.0,
+                randomFloats(generator)
+            );
+            sample = glm::normalize(sample);
+            sample *= randomFloats(generator);
+            
+            // Scale samples s.t. they're more aligned to center of kernel
+            float scale = float(i) / 64.0f;
+            scale = 0.1f + (scale * scale) * (1.0f - 0.1f);
+            sample *= scale;
+            ssaoKernel.push_back(sample);
+        }
+
+        // Step 1: SSAO Compute Pass
+        ssao_compute_shader->use();
+        
+        // Bind G-Buffer textures using automatic slot management
+        Texture::unbind_all_textures();
+        unsigned int ssao_pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssao_normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssao_depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssao_noise_slot = Texture::bind_raw_texture(ssao_noise_texture_->get_id(), GL_TEXTURE_2D);
+        
+        if (ssao_pos_slot != Texture::INVALID_SLOT) ssao_compute_shader->set_int("gPosition", ssao_pos_slot);
+        if (ssao_normal_slot != Texture::INVALID_SLOT) ssao_compute_shader->set_int("gNormalRoughness", ssao_normal_slot);
+        if (ssao_depth_slot != Texture::INVALID_SLOT) ssao_compute_shader->set_int("gDepth", ssao_depth_slot);
+        if (ssao_noise_slot != Texture::INVALID_SLOT) ssao_compute_shader->set_int("noiseTexture", ssao_noise_slot);
+
+        // Set camera uniforms
+        ssao_compute_shader->set_mat4("view", view);
+        ssao_compute_shader->set_mat4("projection", projection);
+        ssao_compute_shader->set_mat4("invView", invView);
+        ssao_compute_shader->set_mat4("invProjection", invProjection);
+        ssao_compute_shader->set_vec3("viewPos", viewPos);
+
+        // Set SSAO parameters
+        ssao_compute_shader->set_int("numSamples", 64);
+        ssao_compute_shader->set_float("radius", 0.5f);
+        ssao_compute_shader->set_float("bias", 0.025f);
+        ssao_compute_shader->set_float("intensity", 1.0f);
+        ssao_compute_shader->set_vec2("noiseScale", glm::vec2(viewport_width_ / 4.0f, viewport_height_ / 4.0f));
+
+        // Upload sample kernel
+        for (unsigned int i = 0; i < 64; ++i) {
+            ssao_compute_shader->set_vec3("samples[" + std::to_string(i) + "]", ssaoKernel[i]);
+        }
+
+        // Bind output texture
+        glBindImageTexture(0, ssao_raw_texture_->get_id(), 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+
+        // Dispatch compute shader
+        glDispatchCompute((viewport_width_ + 7) / 8, (viewport_height_ + 7) / 8, 1);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+        // Step 2: Blur Pass
+        glBindFramebuffer(GL_FRAMEBUFFER, ssao_fbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssao_final_texture_->get_id(), 0);
+        glViewport(0, 0, viewport_width_, viewport_height_);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        ssao_blur_shader->use();
+        
+        // Bind input texture for blurring
+        Texture::reset_slot_counter();
+        unsigned int blur_input_slot = Texture::bind_raw_texture(ssao_raw_texture_->get_id(), GL_TEXTURE_2D);
+        
+        if (blur_input_slot != Texture::INVALID_SLOT) ssao_blur_shader->set_int("ssaoInput", blur_input_slot);
+
+        // Set blur parameters
+        ssao_blur_shader->set_vec2("screenSize", glm::vec2(viewport_width_, viewport_height_));
+        ssao_blur_shader->set_int("blurRadius", 2);
+
+        // Render full-screen quad
+        render_screen_quad();
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        LOG_DEBUG("SSAO render pass completed");
+    }
+
+
+
+    // Hi-Z Buffer Implementation
+    void Renderer::setup_hiz_buffer() {
+        // Calculate number of mip levels needed
+        int max_dimension = std::max(viewport_width_, viewport_height_);
+        hiz_mip_levels_ = static_cast<int>(std::floor(std::log2(max_dimension))) + 1;
+        
+        glGenTextures(2, hiz_textures_);
+        
+        for (int i = 0; i < 2; ++i) {
+            glBindTexture(GL_TEXTURE_2D, hiz_textures_[i]);
+            glTexStorage2D(GL_TEXTURE_2D, hiz_mip_levels_, GL_R32F, viewport_width_, viewport_height_);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        
+        LOG_INFO("Hi-Z Ping-Pong Buffers setup completed: {}x{} with {} mip levels", 
+            viewport_width_, viewport_height_, hiz_mip_levels_);
+    }
+
+    void Renderer::cleanup_hiz_buffer() {
+        if (hiz_textures_[0] != 0) {
+            glDeleteTextures(2, hiz_textures_);
+            hiz_textures_[0] = 0;
+            hiz_textures_[1] = 0;
+        }
+        final_hiz_texture_ = 0;
+        hiz_mip_levels_ = 0;
+        LOG_INFO("Hi-Z Buffer ping-pong cleanup completed");
+    }
+
+    void Renderer::generate_hiz_pyramid(const CoroutineResourceManager& resource_manager) {
+        auto hiz_compute_shader = resource_manager.get_shader("hiz_generate_shader");
+        if (!hiz_compute_shader) { 
+            LOG_ERROR("Renderer: Hi-Z compute shader not found in ResourceManager");
+            return; 
+        }
+        hiz_compute_shader->use();
+
+        // Step 1: Generate Mip 0 from G-Buffer depth texture to hiz_textures_[0]
+        LOG_DEBUG("Hi-Z: Generating Mip 0 from G-Buffer depth texture (ID: {}) to Hi-Z texture (ID: {})", 
+                  g_depth_texture_->get_id(), hiz_textures_[0]);
+        
+        unsigned int depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
+        if (depth_slot != Texture::INVALID_SLOT) {
+            hiz_compute_shader->set_int("inputDepthTexture", depth_slot);
+        }
+        hiz_compute_shader->set_int("currentMipLevel", 0);
+        
+        glBindImageTexture(0, hiz_textures_[0], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        
+        int mip_width = viewport_width_;
+        int mip_height = viewport_height_;
+        LOG_DEBUG("Hi-Z: Dispatching compute for Mip 0: {}x{}, groups: {}x{}", 
+                  mip_width, mip_height, (mip_width + 7) / 8, (mip_height + 7) / 8);
+        glDispatchCompute((mip_width + 7) / 8, (mip_height + 7) / 8, 1);
+        
+        // Memory barrier to ensure Mip 0 is complete
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+        GLuint read_texture = hiz_textures_[0];
+        GLuint write_texture = hiz_textures_[1];
+        
+        // Bind both Hi-Z textures once at the beginning
+        unsigned int hiz_slot_0 = Texture::bind_raw_texture(hiz_textures_[0], GL_TEXTURE_2D);
+        unsigned int hiz_slot_1 = Texture::bind_raw_texture(hiz_textures_[1], GL_TEXTURE_2D);
+
+        // Step 2: Generate Mip 1 to N, alternating read/write
+        for (int mip = 1; mip < hiz_mip_levels_; ++mip) {
+            // Ensure previous write is complete, safe to read
+            glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+            // Bind output texture mip
+            glBindImageTexture(0, write_texture, mip, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+
+            // Use the appropriate slot based on which texture we're reading from
+            unsigned int current_read_slot = (read_texture == hiz_textures_[0]) ? hiz_slot_0 : hiz_slot_1;
+            hiz_compute_shader->set_int("inputDepthTexture", current_read_slot);
+            hiz_compute_shader->set_int("inputMipLevel", mip - 1);
+            hiz_compute_shader->set_int("currentMipLevel", mip);
+            
+            // Dispatch
+            mip_width = std::max(1, viewport_width_ >> mip);
+            mip_height = std::max(1, viewport_height_ >> mip);
+            glDispatchCompute((mip_width + 7) / 8, (mip_height + 7) / 8, 1);
+            
+            // Swap roles for next iteration
+            std::swap(read_texture, write_texture);
+        }
+        
+        // Step 3: Record final result texture, no copy needed!
+        final_hiz_texture_ = read_texture; 
+
+        // Final barrier to ensure all generation operations are complete for subsequent passes
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        
+        LOG_DEBUG("Hi-Z pyramid generation completed");
+    }
+
     void Renderer::SSGI_render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
+        // Initialize screen quad if not already done
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
         if (!use_ssgi_) {
             return;
         }
@@ -1323,7 +1739,7 @@ namespace glRenderer {
 
         // Camera matrices
         glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         glm::mat4 invView = glm::inverse(view);
         glm::mat4 invProjection = glm::inverse(projection);
         glm::vec3 viewPos = camera.get_position();
@@ -1331,30 +1747,23 @@ namespace glRenderer {
         // Step 1: SSGI Compute Pass
         ssgi_compute_shader->use();
         
-        // Bind G-Buffer textures
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-        ssgi_compute_shader->set_int("gPosition", 0);
+        // Bind G-Buffer textures using automatic slot management
+        Texture::reset_slot_counter();
+        unsigned int ssgi_pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssgi_albedo_slot = Texture::bind_raw_texture(g_albedo_metallic_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssgi_normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssgi_motion_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssgi_depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssgi_lit_slot = Texture::bind_raw_texture(lit_scene_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int ssgi_hiz_slot = Texture::bind_raw_texture(final_hiz_texture_, GL_TEXTURE_2D);
         
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-        ssgi_compute_shader->set_int("gAlbedoMetallic", 1);
-        
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-        ssgi_compute_shader->set_int("gNormalRoughness", 2);
-        
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-        ssgi_compute_shader->set_int("gMotionAO", 3);
-        
-        glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
-        ssgi_compute_shader->set_int("gDepth", 4);
-        
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, lit_scene_texture_);
-        ssgi_compute_shader->set_int("litSceneTexture", 5);
+        if (ssgi_pos_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("gPosition", ssgi_pos_slot);
+        if (ssgi_albedo_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("gAlbedoMetallic", ssgi_albedo_slot);
+        if (ssgi_normal_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("gNormalRoughness", ssgi_normal_slot);
+        if (ssgi_motion_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("gMotionAO", ssgi_motion_slot);
+        if (ssgi_depth_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("gDepth", ssgi_depth_slot);
+        if (ssgi_lit_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("litSceneTexture", ssgi_lit_slot);
+        if (ssgi_hiz_slot != Texture::INVALID_SLOT) ssgi_compute_shader->set_int("hizTexture", ssgi_hiz_slot);
 
         // Set camera uniforms
         ssgi_compute_shader->set_mat4("view", view);
@@ -1363,45 +1772,44 @@ namespace glRenderer {
         ssgi_compute_shader->set_mat4("invProjection", invProjection);
         ssgi_compute_shader->set_vec3("viewPos", viewPos);
 
-        // Set SSGI parameters
-        ssgi_compute_shader->set_int("maxSteps", 32);
-        ssgi_compute_shader->set_float("maxDistance", 10.0f);
-        ssgi_compute_shader->set_float("stepSize", 0.1f);
-        ssgi_compute_shader->set_float("thickness", 0.5f);
+        // Set SSGI parameters - optimized for mipmap acceleration
+        ssgi_compute_shader->set_int("maxSteps", 32);        // Fewer steps due to adaptive stepping
+        ssgi_compute_shader->set_float("maxDistance", 8.0f);  // Longer max distance with acceleration
+        ssgi_compute_shader->set_float("stepSize", 0.05f);    // Base step size for adaptive algorithm
+        ssgi_compute_shader->set_float("thickness", 0.4f);   // Slightly thicker for mipmap tolerance
         ssgi_compute_shader->set_float("intensity", 1.0f);
         ssgi_compute_shader->set_int("numSamples", 8);
 
         // Bind output texture
-        glBindImageTexture(0, ssgi_raw_texture_, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+        glBindImageTexture(0, ssgi_raw_texture_->get_id(), 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
 
-        // Dispatch compute shader
-        glDispatchCompute((width_ + 7) / 8, (height_ + 7) / 8, 1);
+        // Dispatch compute shader using actual viewport dimensions
+        glDispatchCompute((viewport_width_ + 7) / 8, (viewport_height_ + 7) / 8, 1);
         glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
         // Step 2: Denoising Pass
         glBindFramebuffer(GL_FRAMEBUFFER, ssgi_fbo_);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssgi_final_texture_, 0);
-        glViewport(0, 0, width_, height_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssgi_final_texture_->get_id(), 0);
+        glViewport(0, 0, viewport_width_, viewport_height_);
         glClear(GL_COLOR_BUFFER_BIT);
 
         ssgi_denoise_shader->use();
         
-        // Bind input textures for denoising
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, ssgi_raw_texture_);
-        ssgi_denoise_shader->set_int("ssgi_raw_texture", 0);
+        // Bind input textures for denoising using automatic slot management
+        Texture::reset_slot_counter();
+        unsigned int denoise_raw_slot = Texture::bind_raw_texture(ssgi_raw_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int denoise_prev_slot = Texture::bind_raw_texture(ssgi_prev_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int denoise_pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int denoise_normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int denoise_motion_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int denoise_depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
         
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-        ssgi_denoise_shader->set_int("gPosition", 1);
-        
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-        ssgi_denoise_shader->set_int("gNormalRoughness", 2);
-        
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
-        ssgi_denoise_shader->set_int("gDepth", 3);
+        if (denoise_raw_slot != Texture::INVALID_SLOT) ssgi_denoise_shader->set_int("ssgi_raw_texture", denoise_raw_slot);
+        if (denoise_prev_slot != Texture::INVALID_SLOT) ssgi_denoise_shader->set_int("ssgi_prev_texture", denoise_prev_slot);
+        if (denoise_pos_slot != Texture::INVALID_SLOT) ssgi_denoise_shader->set_int("gPosition", denoise_pos_slot);
+        if (denoise_normal_slot != Texture::INVALID_SLOT) ssgi_denoise_shader->set_int("gNormalRoughness", denoise_normal_slot);
+        if (denoise_motion_slot != Texture::INVALID_SLOT) ssgi_denoise_shader->set_int("gMotionAO", denoise_motion_slot);
+        if (denoise_depth_slot != Texture::INVALID_SLOT) ssgi_denoise_shader->set_int("gDepth", denoise_depth_slot);
 
         // Set denoising parameters
         ssgi_denoise_shader->set_float("spatialSigma", 2.0f);
@@ -1409,21 +1817,38 @@ namespace glRenderer {
         ssgi_denoise_shader->set_float("depthSigma", 0.01f);
         ssgi_denoise_shader->set_int("filterRadius", 2);
         ssgi_denoise_shader->set_bool("enableTemporalFilter", false);
-        ssgi_denoise_shader->set_vec2("screenSize", glm::vec2(width_, height_));
+        ssgi_denoise_shader->set_vec2("screenSize", glm::vec2(viewport_width_, viewport_height_));
+        
+        // Set temporal accumulation parameters
+        ssgi_denoise_shader->set_float("temporalAlpha", 0.9f);      // High temporal weight for stability
+        ssgi_denoise_shader->set_float("maxTemporalWeight", 0.95f); // Maximum temporal contribution
+        ssgi_denoise_shader->set_bool("isFirstFrame", first_frame_);
 
         // Render full-screen quad
         render_screen_quad();
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        
+        // Copy current frame SSGI result to previous frame texture for next frame temporal accumulation
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, ssgi_fbo_);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindTexture(GL_TEXTURE_2D, ssgi_prev_texture_->get_id());
+        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 0, 0, viewport_width_, viewport_height_, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         LOG_DEBUG("SSGI render pass completed");
     }
 
     void Renderer::render_direct_lighting_pass(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
+        // Initialize screen quad if not already done
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
         // Render direct lighting to lit_scene_texture_
         // LOG_DEBUG("Renderer: Direct lighting pass - binding framebuffer and textures");
         glBindFramebuffer(GL_FRAMEBUFFER, ssgi_fbo_);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lit_scene_texture_, 0);
-        glViewport(0, 0, width_, height_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lit_scene_texture_->get_id(), 0);
+        glViewport(0, 0, viewport_width_, viewport_height_);
         glClear(GL_COLOR_BUFFER_BIT);
         
         // Disable depth testing for screen-space quad
@@ -1440,34 +1865,27 @@ namespace glRenderer {
         
         direct_lighting_shader->use();
         
-        // Bind G-Buffer textures
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-        direct_lighting_shader->set_int("gPosition", 0);
+        // Bind G-Buffer textures using automatic slot management
+        Texture::reset_slot_counter();
+        unsigned int direct_pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int direct_albedo_slot = Texture::bind_raw_texture(g_albedo_metallic_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int direct_normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int direct_motion_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int direct_emissive_slot = Texture::bind_raw_texture(g_emissive_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int direct_depth_slot = Texture::bind_raw_texture(g_depth_texture_->get_id(), GL_TEXTURE_2D);
         
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-        direct_lighting_shader->set_int("gAlbedoMetallic", 1);
+        if (direct_pos_slot != Texture::INVALID_SLOT) direct_lighting_shader->set_int("gPosition", direct_pos_slot);
+        if (direct_albedo_slot != Texture::INVALID_SLOT) direct_lighting_shader->set_int("gAlbedoMetallic", direct_albedo_slot);
+        if (direct_normal_slot != Texture::INVALID_SLOT) direct_lighting_shader->set_int("gNormalRoughness", direct_normal_slot);
+        if (direct_motion_slot != Texture::INVALID_SLOT) direct_lighting_shader->set_int("gMotionAO", direct_motion_slot);
+        if (direct_emissive_slot != Texture::INVALID_SLOT) direct_lighting_shader->set_int("gEmissive", direct_emissive_slot);
+        if (direct_depth_slot != Texture::INVALID_SLOT) direct_lighting_shader->set_int("gDepth", direct_depth_slot);
         
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-        direct_lighting_shader->set_int("gNormalRoughness", 2);
-        
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-        direct_lighting_shader->set_int("gMotionAO", 3);
-        
-        glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, g_emissive_texture_);
-        direct_lighting_shader->set_int("gEmissive", 4);
-        
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, g_depth_texture_);
-        direct_lighting_shader->set_int("gDepth", 5);
+
         
         // Set camera uniforms
         glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         glm::vec3 camera_pos = camera.get_position();
         
         direct_lighting_shader->set_vec3("viewPos", camera_pos);
@@ -1491,15 +1909,17 @@ namespace glRenderer {
         
         // Shadow mapping setup
         if (shadow_map) {
-            glActiveTexture(GL_TEXTURE6);
-            glBindTexture(GL_TEXTURE_2D, shadow_map->get_depth_texture());
-            direct_lighting_shader->set_int("shadowMap", 6);
+            GLuint shadow_texture_id = shadow_map->get_depth_texture();
+            unsigned int direct_shadow_slot = Texture::bind_raw_texture(shadow_texture_id, GL_TEXTURE_2D);
+            if (direct_shadow_slot != Texture::INVALID_SLOT) {
+                direct_lighting_shader->set_int("shadowMap", direct_shadow_slot);
+            }
             direct_lighting_shader->set_bool("enableShadows", true);
-            
-            glm::vec3 shadow_light_direction = glm::normalize(shadow_light_target_ - shadow_light_pos_);
+            direct_lighting_shader->set_mat4("lightSpaceMatrix", last_light_space_matrix_);
+            /*glm::vec3 shadow_light_direction = glm::normalize(shadow_light_target_ - shadow_light_pos_);
             glm::vec3 shadow_center = glm::vec3(0.0f, 0.0f, 0.0f);
-            glm::mat4 lightSpaceMatrix = shadow_map->get_light_space_matrix(shadow_light_direction, shadow_center);
-            direct_lighting_shader->set_mat4("lightSpaceMatrix", lightSpaceMatrix);
+            glm::mat4 lightSpaceMatrix = shadow_map->get_light_space_matrix(shadow_light_direction, shadow_center);*/
+            //direct_lighting_shader->set_mat4("lightSpaceMatrix", lightSpaceMatrix);
         } else {
             direct_lighting_shader->set_bool("enableShadows", false);
         }
@@ -1512,10 +1932,15 @@ namespace glRenderer {
     }
 
     void Renderer::render_composition_pass(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager) {
+        // Initialize screen quad if not already done
+        if (!screen_quad_mesh_) {
+            setup_screen_quad(resource_manager);
+        }
+        
         // Final composition pass - render to main framebuffer
         // LOG_DEBUG("Renderer: Composition pass - combining direct lighting and SSGI");
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-        glViewport(0, 0, width_, height_);
+        glViewport(0, 0, viewport_width_, viewport_height_);
         // Don't clear - skybox is already rendered
         
         // Disable depth testing for screen-space quad
@@ -1532,39 +1957,36 @@ namespace glRenderer {
         
         composition_shader->use();
         
-        // Bind input textures
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, lit_scene_texture_);
-        composition_shader->set_int("litSceneTexture", 0);
+        // Bind input textures using automatic slot management
+        Texture::reset_slot_counter();
+        unsigned int comp_lit_slot = Texture::bind_raw_texture(lit_scene_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int comp_ssgi_slot = Texture::bind_raw_texture(ssgi_final_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int comp_pos_slot = Texture::bind_raw_texture(g_position_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int comp_albedo_slot = Texture::bind_raw_texture(g_albedo_metallic_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int comp_normal_slot = Texture::bind_raw_texture(g_normal_roughness_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int comp_emissive_slot = Texture::bind_raw_texture(g_emissive_texture_->get_id(), GL_TEXTURE_2D);
+        unsigned int comp_motion_slot = Texture::bind_raw_texture(g_motion_ao_texture_->get_id(), GL_TEXTURE_2D);
         
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, ssgi_final_texture_);
-        composition_shader->set_int("ssgi_final_texture", 1);
+        if (comp_lit_slot != Texture::INVALID_SLOT) composition_shader->set_int("litSceneTexture", comp_lit_slot);
+        if (comp_ssgi_slot != Texture::INVALID_SLOT) composition_shader->set_int("ssgi_final_texture", comp_ssgi_slot);
+        if (comp_pos_slot != Texture::INVALID_SLOT) composition_shader->set_int("gPosition", comp_pos_slot);
+        if (comp_albedo_slot != Texture::INVALID_SLOT) composition_shader->set_int("gAlbedoMetallic", comp_albedo_slot);
+        if (comp_normal_slot != Texture::INVALID_SLOT) composition_shader->set_int("gNormalRoughness", comp_normal_slot);
+        if (comp_emissive_slot != Texture::INVALID_SLOT) composition_shader->set_int("gEmissive", comp_emissive_slot);
+        if (comp_motion_slot != Texture::INVALID_SLOT) composition_shader->set_int("gMotionAO", comp_motion_slot);
         
-        // Bind G-Buffer textures for background detection and environment lighting
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, g_position_texture_);
-        composition_shader->set_int("gPosition", 2);
-        
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, g_albedo_metallic_texture_);
-        composition_shader->set_int("gAlbedoMetallic", 3);
-        
-        glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, g_normal_roughness_texture_);
-        composition_shader->set_int("gNormalRoughness", 4);
-        
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, g_emissive_texture_);
-        composition_shader->set_int("gEmissive", 5);
-        
-        glActiveTexture(GL_TEXTURE6);
-        glBindTexture(GL_TEXTURE_2D, g_motion_ao_texture_);
-        composition_shader->set_int("gMotionAO", 6);
+        // Bind SSAO texture if enabled
+        if (use_ssao_) {
+            unsigned int ssao_slot = Texture::bind_raw_texture(ssao_final_texture_->get_id(), GL_TEXTURE_2D);
+            if (ssao_slot != Texture::INVALID_SLOT) composition_shader->set_int("ssaoTexture", ssao_slot);
+            composition_shader->set_bool("enableSSAO", true);
+        } else {
+            composition_shader->set_bool("enableSSAO", false);
+        }
         
         // Set camera uniforms
         glm::mat4 view = camera.get_view_matrix();
-        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(width_) / static_cast<float>(height_));
+        glm::mat4 projection = camera.get_projection_matrix(static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_));
         glm::mat4 invView = glm::inverse(view);
         glm::mat4 invProjection = glm::inverse(projection);
         glm::vec3 camera_pos = camera.get_position();
@@ -1579,9 +2001,10 @@ namespace glRenderer {
         // IBL setup
         auto irradiance_map = resource_manager.get_irradiance_map("skybox_cubemap");
         if (irradiance_map) {
-            glActiveTexture(GL_TEXTURE7);
-            irradiance_map->bind_cube_map(7);
-            composition_shader->set_int("irradianceMap", 7);
+            unsigned int slot = irradiance_map->bind_cubemap_auto();
+            if (slot != Texture::INVALID_SLOT) {
+                composition_shader->set_int("irradianceMap", slot);
+            }
             composition_shader->set_bool("useIBL", true);
         } else {
             composition_shader->set_bool("useIBL", false);

@@ -73,8 +73,21 @@ vec3 getNormalFromMap()
 
 vec2 calculateMotionVector()
 {
-    // Simplified - return zero motion vector for now
-    return vec2(0.0, 0.0);
+    // Calculate current screen position
+    vec4 currentPos = gl_FragCoord;
+    vec2 currentScreenPos = currentPos.xy / currentPos.w;
+    
+    // Calculate previous screen position
+    vec4 prevScreenPos = PrevFragPos;
+    prevScreenPos /= prevScreenPos.w;
+    prevScreenPos.xy = prevScreenPos.xy * 0.5 + 0.5; // Convert from [-1,1] to [0,1]
+    
+    // Current position in [0,1] range
+    vec2 screenSize = textureSize(albedoTexture, 0); // Use any available texture to get screen size
+    currentScreenPos = currentScreenPos / screenSize;
+    
+    // Motion vector is the difference between current and previous positions
+    return currentScreenPos - prevScreenPos.xy;
 }
 
 void main()

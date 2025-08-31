@@ -6,6 +6,8 @@
 #include "Light.h"
 #include <filesystem>
 #include <shared_mutex>
+#include <fstream>
+#include <sstream>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -177,8 +179,16 @@ Async::Task<std::shared_ptr<Texture>> CoroutineResourceManager::load_texture_asy
         auto texture = co_await scheduler_->submit_to_threadpool(priority, [path]() -> std::shared_ptr<Texture> {
             LOG_DEBUG("CoroutineResourceManager: Worker thread loading texture: {}", path);
             
-            // This should be the actual texture loading logic
             auto texture = std::make_shared<Texture>();
+            
+            // Determine file type and load accordingly
+            if (glRenderer::STBImage::is_exr_file(path.c_str()) || glRenderer::STBImage::is_hdr_file(path.c_str())) {
+                // Load HDR/EXR files
+                texture->load_equirectangular_hdr(path);
+            } else {
+                // Load standard LDR files
+                texture->load_from_file(path);
+            }
             
             LOG_DEBUG("CoroutineResourceManager: Texture loaded successfully: {}", path);
             return texture;
@@ -288,13 +298,14 @@ bool CoroutineResourceManager::validate_resource_path(const std::string& path) c
 }
 
 std::string CoroutineResourceManager::normalize_resource_path(const std::string& path) const {
-    try {
+    /*try {
         std::filesystem::path fsPath(path);
         return fsPath.lexically_normal().string();
     } catch (const std::exception& e) {
         LOG_WARN("CoroutineResourceManager: Path normalization failed for {}: {}", path, e.what());
         return path;
-    }
+    }*/
+    return path;
 }
 
 void CoroutineResourceManager::update_stats(Async::TaskPriority priority, bool cache_hit) const {
@@ -414,23 +425,7 @@ std::unordered_map<std::string, std::shared_ptr<Texture>> CoroutineResourceManag
     return textures;
 }
 
-std::vector<std::shared_ptr<Model>> CoroutineResourceManager::get_scene_models(const Scene& scene) {
-    std::vector<std::shared_ptr<Model>> models;
-    
-    const auto& modelRefs = scene.get_model_references();
-    models.reserve(modelRefs.size());
-    
-    for (const auto& modelId : modelRefs) {
-        auto model = get<Model>(modelId);
-        if (model) {
-            models.push_back(model);
-        } else {
-            LOG_WARN("CoroutineResourceManager: Model '{}' not found in cache", modelId);
-        }
-    }
-    
-    return models;
-}
+
 
 std::vector<std::shared_ptr<Light>> CoroutineResourceManager::get_scene_lights(const Scene& scene) const {
     std::vector<std::shared_ptr<Light>> lights;
@@ -450,6 +445,25 @@ std::vector<std::shared_ptr<Light>> CoroutineResourceManager::get_scene_lights(c
     
     //LOG_DEBUG("CoroutineResourceManager: Retrieved {}/{} lights from scene", lights.size(), lightRefs.size());
     return lights;
+}
+
+std::vector<std::shared_ptr<Renderable>> CoroutineResourceManager::get_scene_renderables(const Scene& scene) const {
+    std::vector<std::shared_ptr<Renderable>> renderables;
+    
+    const auto& renderableRefs = scene.get_renderable_references();
+    renderables.reserve(renderableRefs.size());
+    
+    std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+    for (const auto& renderable_id : renderableRefs) {
+        auto it = renderable_cache_.find(renderable_id);
+        if (it != renderable_cache_.end()) {
+            renderables.push_back(it->second);
+        } else {
+            LOG_WARN("CoroutineResourceManager: Renderable '{}' not found in cache", renderable_id);
+        }
+    }
+    
+    return renderables;
 }
 
 void CoroutineResourceManager::store_light_in_cache(const std::string& light_id, std::shared_ptr<Light> light) {
@@ -497,6 +511,52 @@ void CoroutineResourceManager::store_mesh_in_cache(const std::string& mesh_id, s
     LOG_DEBUG("CoroutineResourceManager: Mesh '{}' stored in cache", mesh_id);
 }
 
+void CoroutineResourceManager::store_texture_in_cache(const std::string& texture_id, std::shared_ptr<Texture> texture) {
+    if (!texture) {
+        LOG_ERROR("CoroutineResourceManager: Invalid texture pointer for '{}'", texture_id);
+        return;
+    }
+    
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    texture_cache_[texture_id] = texture;
+    LOG_DEBUG("CoroutineResourceManager: Texture '{}' stored in cache", texture_id);
+}
+
+void CoroutineResourceManager::store_renderable_in_cache(const std::string& renderable_id, std::shared_ptr<Renderable> renderable) {
+    if (!renderable) {
+        LOG_ERROR("CoroutineResourceManager: Invalid renderable pointer for '{}'", renderable_id);
+        return;
+    }
+    
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    renderable_cache_[renderable_id] = renderable;
+    LOG_DEBUG("CoroutineResourceManager: Renderable '{}' stored in cache", renderable_id);
+}
+
+void CoroutineResourceManager::load_model_textures(const std::unordered_map<std::string, std::string>& texture_paths) {
+    LOG_INFO("CoroutineResourceManager: Loading {} textures for model", texture_paths.size());
+    
+    for (const auto& [texture_name, texture_path] : texture_paths) {
+        try {
+            // Check if texture is already cached
+            auto existing_texture = get<Texture>(texture_path);
+            if (!existing_texture) {
+                // Create and load texture
+                auto texture = std::make_shared<Texture>();
+                texture->load_from_file(texture_path);
+                
+                // Cache the loaded texture
+                store_texture_in_cache(texture_path, texture);
+                LOG_INFO("CoroutineResourceManager: Loaded and cached texture: {}", texture_path);
+            } else {
+                LOG_DEBUG("CoroutineResourceManager: Using cached texture: {}", texture_path);
+            }
+        } catch (const std::exception& e) {
+            LOG_WARN("CoroutineResourceManager: Failed to load texture {}: {}", texture_path, e.what());
+        }
+    }
+}
+
 std::shared_ptr<Model> CoroutineResourceManager::create_model_with_default_material(const std::string& mesh_path, const std::string& model_name) {
     LOG_INFO("CoroutineResourceManager: Creating model '{}' with default material from mesh '{}'", model_name, mesh_path);
     
@@ -514,75 +574,219 @@ std::shared_ptr<Model> CoroutineResourceManager::create_model_with_default_mater
         return nullptr;
     }
     
-    // Create default material for imported models
-    auto default_material = std::make_shared<Material>(Material::create_pbr_default());
-    default_material->set_albedo(glm::vec3(0.8f, 0.2f, 0.2f)); // Bright red color
-    default_material->set_metallic(0.1f);
-    default_material->set_roughness(0.7f);
+    // First, try to find an existing material for this model
+    std::shared_ptr<Material> material;
+    std::string material_id = "material_" + model_name;
     
-    // Store material with a consistent naming scheme
-    std::string material_id = "default_material_" + model_name;
-    store_material_in_cache(material_id, default_material);
-    LOG_DEBUG("CoroutineResourceManager: Created and cached default material '{}'", material_id);
+    // Check if we have a material from the model file
+    material = get<Material>(material_id);
+    
+    if (material) {
+        LOG_INFO("CoroutineResourceManager: Using cached material '{}' from model file", material_id);
+    } else {
+        // Fallback to default material if no material was loaded from the model file
+        material = std::make_shared<Material>(Material::create_pbr_default());
+        material->set_albedo(glm::vec3(0.8f, 0.2f, 0.2f)); // Bright red color
+        material->set_metallic(0.1f);
+        material->set_roughness(0.7f);
+        
+        // Store default material with a different naming scheme
+        material_id = "default_material_" + model_name;
+        store_material_in_cache(material_id, material);
+        LOG_INFO("CoroutineResourceManager: Created and cached default material '{}' (no material found in model file)", material_id);
+    }
     
     // Create and cache the model
-    auto model = std::make_shared<Model>(mesh.get(), default_material.get());
+    auto model = std::make_shared<Model>(mesh.get(), material.get());
     store_model_in_cache(model_name, model);
     LOG_INFO("CoroutineResourceManager: Created and cached model '{}'", model_name);
     
     return model;
 }
 
-// std::shared_ptr<Model> CoroutineResourceManager::get_model(const std::string& model_id) const {
-//     std::shared_lock<std::shared_mutex> lock(cache_mutex_);
-//     auto it = model_cache_.find(model_id);
+std::shared_ptr<Mesh> CoroutineResourceManager::createQuad(const std::string& quad_id) {
+    // Check if quad already exists in cache
+    {
+        std::shared_lock<std::shared_mutex> cache_lock(cache_mutex_);
+        auto it = mesh_cache_.find(quad_id);
+        if (it != mesh_cache_.end()) {
+            LOG_DEBUG("CoroutineResourceManager: Found cached quad: {}", quad_id);
+            return it->second;
+        }
+    }
     
-//     if (it != model_cache_.end()) {
-//         LOG_DEBUG("CoroutineResourceManager: Retrieved cached model: {}", model_id);
-//         return it->second;
-//     }
+    // Create quad vertices (screen-space quad in NDC coordinates)
+    // Using 4 vertices with indices for efficiency
+    std::vector<Mesh::Vertex> vertices = {
+        {{-1.0f,  1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}}, // Top-left
+        {{-1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}}, // Bottom-left  
+        {{ 1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}}, // Bottom-right
+        {{ 1.0f,  1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f}}  // Top-right
+    };
     
-//     LOG_DEBUG("CoroutineResourceManager: Model not found in cache: {}", model_id);
-//     return nullptr;
-// }
+    // Create indices for two triangles
+    std::vector<unsigned int> indices = {
+        0, 1, 2,  // First triangle (top-left, bottom-left, bottom-right)
+        0, 2, 3   // Second triangle (top-left, bottom-right, top-right)
+    };
+    
+    // Create mesh
+    auto quad_mesh = std::make_shared<Mesh>(vertices, indices);
+    
+    // Cache the quad mesh
+    {
+        std::unique_lock<std::shared_mutex> cache_lock(cache_mutex_);
+        mesh_cache_[quad_id] = quad_mesh;
+        LOG_DEBUG("CoroutineResourceManager: Created and cached quad: {}", quad_id);
+    }
+    
+    return quad_mesh;
+}
 
-std::shared_ptr<Shader> CoroutineResourceManager::create_shader(const std::string& shaderName,
-                                                                const std::string& vertexPath,
-                                                                const std::string& fragmentPath,
-                                                                const std::string& geometryPath,
-                                                                const std::string& computePath) {
-    LOG_INFO("CoroutineResourceManager: Creating shader '{}' from vertex '{}' and fragment '{}'", 
-                              shaderName, vertexPath, fragmentPath);
+Async::Task<LoadedModelData> CoroutineResourceManager::load_model_with_textures_async(const std::string& model_path,
+                                                                                     std::function<void(float, const std::string&)> progress_callback,
+                                                                                     Async::TaskPriority priority) {
+    LOG_INFO("CoroutineResourceManager: Loading model with textures: {}", model_path);
     
-    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    if (progress_callback) {
+        progress_callback(0.0f, "Starting model load with textures...");
+    }
     
-    // Check if shader already exists
-    auto it = shader_cache_.find(shaderName);
-    if (it != shader_cache_.end()) {
-        LOG_WARN("CoroutineResourceManager: Shader '{}' already exists, returning existing", shaderName);
-        return it->second;
+    if (!validate_resource_path(model_path)) {
+        LOG_ERROR("CoroutineResourceManager: Invalid path for model load: {}", model_path);
+        if (progress_callback) {
+            progress_callback(0.0f, "Invalid path");
+        }
+        co_return LoadedModelData{};
     }
     
     try {
-        // Create new shader
-        std::shared_ptr<Shader> shader;
-        if (!computePath.empty()) {
-            // Compute shader
-            shader = std::make_shared<Shader>(vertexPath.c_str(), fragmentPath.c_str(), geometryPath.c_str(), computePath.c_str());
-        } else if (geometryPath.empty()) {
-            shader = std::make_shared<Shader>(vertexPath.c_str(), fragmentPath.c_str());
-        } else {
-            shader = std::make_shared<Shader>(vertexPath.c_str(), fragmentPath.c_str(), geometryPath.c_str());
+        // Check if scheduler is available
+        if (!scheduler_) {
+            LOG_ERROR("CoroutineResourceManager: Scheduler not available for model loading with textures");
+            if (progress_callback) {
+                progress_callback(0.0f, "Scheduler not available");
+            }
+            co_return LoadedModelData{};
         }
         
-        // Store in cache
-        shader_cache_[shaderName] = shader;
+        // Use AssimpLoader to load model with textures in thread pool
+        auto model_data = co_await scheduler_->submit_to_threadpool(priority, [this, model_path, progress_callback]() -> LoadedModelData {
+            if (progress_callback) {
+                progress_callback(0.1f, "Loading model data with textures...");
+            }
+            
+            try {
+                // Use the enhanced AssimpLoader method
+                LoadedModelData data = assimp_loader_->load_model_with_textures(model_path);
+                
+                if (progress_callback) {
+                    progress_callback(0.8f, "Processing textures...");
+                }
+                
+                // Log texture paths found in model file (actual loading will be done in main thread)
+                LOG_INFO("CoroutineResourceManager: Found {} texture paths in model file", data.texture_paths.size());
+                for (const auto& [texture_name, texture_path] : data.texture_paths) {
+                    LOG_INFO("CoroutineResourceManager: Texture reference found - {}: {}", texture_name, texture_path);
+                }
+                
+                if (progress_callback) {
+                    progress_callback(1.0f, "Model with textures loaded successfully!");
+                }
+                
+                // Calculate total vertices and indices from all meshes
+                size_t total_vertices = 0;
+                size_t total_indices = 0;
+                for (const auto& mesh : data.meshes) {
+                    total_vertices += mesh.vertices.size();
+                    total_indices += mesh.indices.size();
+                }
+                
+                LOG_INFO("CoroutineResourceManager: Loaded {} meshes with {} vertices, {} indices, {} materials, {} textures", 
+                        data.meshes.size(), total_vertices, total_indices, data.materials.size(), data.texture_paths.size());
+                
+                return data;
+                
+            } catch (const std::exception& e) {
+                LOG_ERROR("CoroutineResourceManager: Failed to load model with textures: {}", e.what());
+                if (progress_callback) {
+                    progress_callback(0.0f, "Failed to load model");
+                }
+                return LoadedModelData{};
+            }
+        });
         
-        LOG_INFO("CoroutineResourceManager: Shader '{}' created and cached successfully", shaderName);
+        stats_.async_loads_completed.fetch_add(1, std::memory_order_relaxed);
+        co_return model_data;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("CoroutineResourceManager: Exception during model loading with textures: {}", e.what());
+        if (progress_callback) {
+            progress_callback(0.0f, "Loading failed");
+        }
+        co_return LoadedModelData{};
+    }
+}
+
+std::shared_ptr<Shader> CoroutineResourceManager::create_shader_sync(
+    const std::string& shader_name,
+    const std::vector<ShaderSource>& sources) {
+    
+    // Check cache first
+    {
+        std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+        auto it = shader_cache_.find(shader_name);
+        if (it != shader_cache_.end()) {
+            return it->second;
+        }
+    }
+    
+    try {
+        // Read all shader source files synchronously
+        std::vector<std::pair<std::string, GLenum>> shader_sources;
+        shader_sources.reserve(sources.size());
+        
+        for (const auto& source : sources) {
+            if (!source.path.empty()) {
+                std::ifstream file(source.path);
+                if (!file.is_open()) {
+                    throw std::runtime_error("Failed to open shader file: " + source.path);
+                }
+                
+                std::stringstream stream;
+                stream << file.rdbuf();
+                file.close();
+                
+                std::string source_code = stream.str();
+                if (source_code.empty()) {
+                    throw std::runtime_error("Shader file is empty: " + source.path);
+                }
+                
+                shader_sources.push_back({ source_code, source.type });
+            }
+        }
+        
+        // Create and compile shader
+        auto shader = std::make_shared<Shader>();
+        
+        // Attach all shaders
+        for (const auto& source_data : shader_sources) {
+            shader->attach_shader(source_data.first, source_data.second);
+        }
+        
+        // Link the program
+        shader->link_program();
+        
+        // Store in cache
+        {
+            std::unique_lock<std::shared_mutex> cache_lock(cache_mutex_);
+            shader_cache_[shader_name] = shader;
+        }
+        
         return shader;
         
     } catch (const std::exception& e) {
-        LOG_ERROR("CoroutineResourceManager: Failed to create shader '{}': {}", shaderName, e.what());
+        LOG_ERROR("CoroutineResourceManager: Failed to create shader '{}': {}", shader_name, e.what());
         return nullptr;
     }
 }
@@ -599,16 +803,16 @@ std::shared_ptr<Shader> CoroutineResourceManager::get_shader(const std::string& 
     return nullptr;
 }
 
-void CoroutineResourceManager::store_shader(const std::string& shaderName, std::shared_ptr<Shader> shader) {
-    if (!shader) {
-        LOG_ERROR("CoroutineResourceManager: Invalid shader pointer for '{}'", shaderName);
-        return;
-    }
-    
-    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
-    shader_cache_[shaderName] = shader;
-    LOG_DEBUG("CoroutineResourceManager: Shader '{}' stored in cache", shaderName);
-}
+//void CoroutineResourceManager::store_shader(const std::string& shaderName, std::shared_ptr<Shader> shader) {
+//    if (!shader) {
+//        LOG_ERROR("CoroutineResourceManager: Invalid shader pointer for '{}'", shaderName);
+//        return;
+//    }
+//    
+//    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+//    shader_cache_[shaderName] = shader;
+//    LOG_DEBUG("CoroutineResourceManager: Shader '{}' stored in cache", shaderName);
+//}
 
 void CoroutineResourceManager::remove_shader(const std::string& shaderName) {
     std::unique_lock<std::shared_mutex> lock(cache_mutex_);
@@ -724,23 +928,25 @@ std::unique_ptr<Scene> CoroutineResourceManager::create_simple_scene() {
         mesh_cache_["simple_scene_plane"] = plane_mesh;
     }
    
-    // Main directional light for shadow casting 
+    // Main directional light (Sun) - optimized settings based on recommendations
     auto directional_light_main = std::make_shared<DirectionalLight>(
-        glm::vec3(-0.5f, -1.0f, -0.5f),  // Direction from top-right to bottom
-        glm::vec3(1.0f, 1.0f, 1.0f)      
+        glm::normalize(glm::vec3(-0.5f, -1.0f, -0.5f)),  // Direction from top to create layered shadows
+        glm::vec3(1.0f, 0.96f, 0.84f)      // Warm, natural daylight color
     );
-    directional_light_main->set_intensity(1.5f);
+    directional_light_main->set_intensity(20.0f);  // Higher intensity for GI multiple bounces
     store_light_in_cache("directional_light_main", directional_light_main);
     
-    // Warm point light from the right 
+    // Secondary point light for fill lighting
     auto point_light_1 = std::make_shared<PointLight>(
         glm::vec3(1.2f, 1.2f, 0.8f),   
-        glm::vec3(1.0f, 0.8f, 0.6f),   
+        glm::vec3(1.0f, 0.8f, 0.6f),   // Warm fill light
         8.0f  
     );
     point_light_1->set_intensity(1.5f);  
     store_light_in_cache("point_light_1", point_light_1);
     
+    // COMMENTED OUT: Extra lights to reduce complexity and improve performance
+    /*
     // Cool light from the left
     auto point_light_2 = std::make_shared<PointLight>(
         glm::vec3(-1.2f, 1.5f, 1.0f),  
@@ -772,20 +978,29 @@ std::unique_ptr<Scene> CoroutineResourceManager::create_simple_scene() {
     spot_light_2->set_intensity(0.6f);
     store_light_in_cache("spot_light_2", spot_light_2);
     
-    // Directional light
+    // Secondary directional light
     auto directional_light = std::make_shared<DirectionalLight>(
         glm::vec3(-0.3f, -1.0f, -0.2f), // Direction 
         glm::vec3(1.0f, 0.95f, 0.9f)    
     );
     directional_light->set_intensity(1.2f);  
     store_light_in_cache("directional_light", directional_light);
+    */
 
     // Create materials using predefined presets
-    // Cube: Diffuse material (wood-like)
+    // Cube: Diffuse material (wood-like) with clay texture
     auto cube_material = std::make_shared<Material>(Material::create_pbr_wood());
     cube_material->set_albedo(glm::vec3(0.8f, 0.4f, 0.2f)); // Warm wood color
     cube_material->set_diffuse(glm::vec3(0.8f, 0.4f, 0.2f)); // Match diffuse to albedo
     cube_material->set_ambient(glm::vec3(0.12f, 0.06f, 0.03f)); // Darker ambient
+    
+    // Load and bind clay texture to the cube
+    auto clay_texture = std::make_shared<Texture>();
+    std::string texture_path = "../assets/textures/clay.jpg";
+    texture_path = normalize_resource_path(texture_path);
+    clay_texture->load_from_file(texture_path);
+    cube_material->add_texture("diffuse", texture_path);
+    cube_material->add_texture("albedo", texture_path);
     
     // Plane: Glossy material (metallic)
     auto plane_material = std::make_shared<Material>(Material::create_pbr_metal());
@@ -794,30 +1009,35 @@ std::unique_ptr<Scene> CoroutineResourceManager::create_simple_scene() {
     plane_material->set_roughness(0.1f); // Very smooth for glossy appearance
     plane_material->set_ambient(glm::vec3(0.1f, 0.1f, 0.12f)); // Slightly blue ambient
 
-    // Store materials in cache
+    // Store materials and textures in cache
     {
         std::unique_lock<std::shared_mutex> lock(cache_mutex_);
         material_cache_["simple_scene_cube_material"] = cube_material;
         material_cache_["simple_scene_plane_material"] = plane_material;
+        texture_cache_[texture_path] = clay_texture;
     }
 
     // Create shaders
-    auto main_shader = create_shader("simple_scene_main_shader",
-                                   "../assets/shaders/vertex.glsl",
-                                   "../assets/shaders/phong_fragment.glsl");
+    auto main_shader = create_shader_sync("simple_scene_main_shader", {
+        {"../assets/shaders/vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/phong_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
-    auto light_shader = create_shader("simple_scene_light_shader",
-                                    "../assets/shaders/light_vertex.glsl",
-                                    "../assets/shaders/light_fragment.glsl");
+    auto light_shader = create_shader_sync("simple_scene_light_shader", {
+        {"../assets/shaders/light_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/light_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
     // Create deferred rendering shaders
-    auto deferred_geometry_shader = create_shader("deferred_geometry_shader",
-                                                "../assets/shaders/deferred_geometry_vertex.glsl",
-                                                "../assets/shaders/deferred_geometry_fragment.glsl");
+    auto deferred_geometry_shader = create_shader_sync("deferred_geometry_shader", {
+        {"../assets/shaders/deferred_geometry_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/deferred_geometry_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
-    auto deferred_lighting_shader = create_shader("deferred_lighting_shader",
-                                                "../assets/shaders/deferred_lighting_vertex.glsl",
-                                                "../assets/shaders/deferred_lighting_fragment.glsl");
+    auto deferred_lighting_shader = create_shader_sync("deferred_lighting_shader", {
+        {"../assets/shaders/deferred_lighting_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/deferred_lighting_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
     if (!deferred_lighting_shader) {
         LOG_ERROR("Failed to create deferred_lighting_shader!");
@@ -825,76 +1045,141 @@ std::unique_ptr<Scene> CoroutineResourceManager::create_simple_scene() {
         LOG_INFO("Successfully created deferred_lighting_shader");
     }
     
+    // Create SSAO shaders
+    auto ssao_compute_shader = create_shader_sync("ssao_compute_shader", {
+        {"../assets/shaders/ssao_compute.glsl", GL_COMPUTE_SHADER}
+    });
+    
+    auto ssao_blur_shader = create_shader_sync("ssao_blur_shader", {
+        {"../assets/shaders/ssao_blur_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/ssao_blur_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
+    
+    auto ssao_apply_shader = create_shader_sync("ssao_apply_shader", {
+        {"../assets/shaders/ssao_apply_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/ssao_apply_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
+    
     // Create SSGI shaders
-    auto deferred_lighting_direct_shader = create_shader("deferred_lighting_direct_shader",
-                                                       "../assets/shaders/deferred_lighting_direct_vertex.glsl",
-                                                       "../assets/shaders/deferred_lighting_direct_fragment.glsl");
     
-    auto ssgi_compute_shader = create_shader("ssgi_compute_shader",
-                                           "",
-                                           "",
-                                           "",
-                                           "../assets/shaders/ssgi_compute.glsl");
+    auto deferred_lighting_direct_shader = create_shader_sync("deferred_lighting_direct_shader", {
+        {"../assets/shaders/deferred_lighting_direct_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/deferred_lighting_direct_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
-    auto ssgi_denoise_shader = create_shader("ssgi_denoise_shader",
-                                           "../assets/shaders/ssgi_denoise_vertex.glsl",
-                                           "../assets/shaders/ssgi_denoise_fragment.glsl");
+    auto ssgi_compute_shader = create_shader_sync("ssgi_compute_shader", {
+        {"../assets/shaders/ssgi_compute.glsl", GL_COMPUTE_SHADER}
+    });
     
-    auto ssgi_composition_shader = create_shader("ssgi_composition_shader",
-                                               "../assets/shaders/ssgi_composition_vertex.glsl",
-                                               "../assets/shaders/ssgi_composition_fragment.glsl");
+    auto ssgi_denoise_shader = create_shader_sync("ssgi_denoise_shader", {
+        {"../assets/shaders/ssgi_denoise_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/ssgi_denoise_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
-    if (!deferred_lighting_direct_shader || !ssgi_compute_shader || !ssgi_denoise_shader || !ssgi_composition_shader) {
-        LOG_ERROR("Failed to create SSGI shaders!");
+    auto ssgi_composition_shader = create_shader_sync("ssgi_composition_shader", {
+        {"../assets/shaders/ssgi_composition_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/ssgi_composition_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
+
+    // Hi-Z Buffer generation compute shader
+    auto hiz_generate_shader = create_shader_sync("hiz_generate_shader", {
+        {"../assets/shaders/hiz_generate.glsl", GL_COMPUTE_SHADER}
+    });
+    
+    if (!ssao_compute_shader || !ssao_blur_shader || !ssao_apply_shader || !deferred_lighting_direct_shader || 
+        !ssgi_compute_shader || !ssgi_denoise_shader || !ssgi_composition_shader || !hiz_generate_shader) {
+        LOG_ERROR("Failed to create SSAO, SSGI or Hi-Z shaders!");
     } else {
-        LOG_INFO("Successfully created all SSGI shaders");
+        LOG_INFO("Successfully created all SSAO, SSGI and Hi-Z shaders");
     }
     
-    auto gbuffer_debug_shader = create_shader("gbuffer_debug_shader",
-                                            "../assets/shaders/gbuffer_debug_vertex.glsl",
-                                            "../assets/shaders/gbuffer_debug_fragment.glsl");
+    
+    // auto gbuffer_debug_shader = create_shader_sync("gbuffer_debug_shader", {
+    //     {"../assets/shaders/gbuffer_debug_vertex.glsl", GL_VERTEX_SHADER},
+    //     {"../assets/shaders/gbuffer_debug_fragment.glsl", GL_FRAGMENT_SHADER}
+    // });
     
     // Create skybox shader
-    auto skybox_shader = create_shader("skybox_shader",
-                                     "../assets/shaders/skybox_vertex.glsl",
-                                     "../assets/shaders/skybox_fragment.glsl");
+    auto skybox_shader = create_shader_sync("skybox_shader", {
+        {"../assets/shaders/skybox_vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/skybox_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
     
     // Create plane reflection shader
-    auto plane_reflection_shader = create_shader("plane_reflection_shader",
-                                               "../assets/shaders/vertex.glsl",
-                                               "../assets/shaders/plane_reflection_fragment.glsl");
+    auto plane_reflection_shader = create_shader_sync("plane_reflection_shader", {
+        {"../assets/shaders/vertex.glsl", GL_VERTEX_SHADER},
+        {"../assets/shaders/plane_reflection_fragment.glsl", GL_FRAGMENT_SHADER}
+    });
+
 
     // Create models by combining meshes and materials (observers only)
     auto cube_model = std::make_shared<Model>(cube_mesh.get(), cube_material.get());
-    
     auto plane_model = std::make_shared<Model>(plane_mesh.get(), plane_material.get());
     
     // Store models in cache
-    {
-        std::unique_lock<std::shared_mutex> lock(cache_mutex_);
-        model_cache_["simple_scene_cube_model"] = cube_model;
-        model_cache_["simple_scene_plane_model"] = plane_model;
-    }
+    store_model_in_cache("simple_scene_cube_model", cube_model);
+    store_model_in_cache("simple_scene_plane_model", plane_model);
+
+    // Create Renderables
+    auto cube_renderable = std::make_shared<Renderable>("simple_scene_cube_renderable");
+    cube_renderable->add_model("simple_scene_cube_model");
+    
+    auto plane_renderable = std::make_shared<Renderable>("simple_scene_plane_renderable");
+    plane_renderable->add_model("simple_scene_plane_model");
+    
+    // Example: Create a complex renderable with multiple models
+    // This demonstrates how a single Renderable can contain multiple Model components
+    auto complex_renderable = std::make_shared<Renderable>("simple_scene_complex_renderable");
+    complex_renderable->add_model("simple_scene_cube_model");
+    complex_renderable->add_model("simple_scene_plane_model");
+    
+    // Store renderables in cache
+    store_renderable_in_cache("simple_scene_cube_renderable", cube_renderable);
+    store_renderable_in_cache("simple_scene_plane_renderable", plane_renderable);
+    store_renderable_in_cache("simple_scene_complex_renderable", complex_renderable);
 
     assemble_model("simple_scene_cube_model", "simple_scene_cube_material");
     
-    // Create skybox cubemap texture
-    auto skybox_texture = std::make_shared<Texture>();
-    std::vector<std::string> skybox_faces = {
-        "../assets/textures/skybox/skybox/right.jpg",   // +X
-        "../assets/textures/skybox/skybox/left.jpg",    // -X
-        "../assets/textures/skybox/skybox/top.jpg",     // +Y
-        "../assets/textures/skybox/skybox/bottom.jpg",  // -Y
-        "../assets/textures/skybox/skybox/front.jpg",   // +Z
-        "../assets/textures/skybox/skybox/back.jpg"     // -Z
-    };
-    skybox_texture->load_cubemap_from_files(skybox_faces);
+    // Create HDR/EXR skybox cubemap texture
+    LOG_INFO("CoroutineResourceManager: Loading HDR skybox from EXR file");
+    auto skybox_texture = load_hdr_skybox_cubemap("../assets/textures/skybox/outdoor_chapel_4k.exr");
     
     // Store skybox texture in cache
-    {
+    if (skybox_texture) {
         std::unique_lock<std::shared_mutex> lock(cache_mutex_);
         texture_cache_["skybox_cubemap"] = skybox_texture;
+        LOG_INFO("CoroutineResourceManager: HDR skybox loaded and cached successfully");
+    } else {
+        LOG_ERROR("CoroutineResourceManager: Failed to load HDR skybox, falling back to LDR skybox");
+        
+        // Fallback to original LDR skybox if EXR loading fails
+        auto fallback_skybox_texture = std::make_shared<Texture>();
+        std::vector<std::string> skybox_faces = {
+            "../assets/textures/skybox/skybox/right.jpg",   // +X
+            "../assets/textures/skybox/skybox/left.jpg",    // -X
+            "../assets/textures/skybox/skybox/top.jpg",     // +Y
+            "../assets/textures/skybox/skybox/bottom.jpg",  // -Y
+            "../assets/textures/skybox/skybox/front.jpg",   // +Z
+            "../assets/textures/skybox/skybox/back.jpg"     // -Z
+        };
+        fallback_skybox_texture->load_cubemap_from_files(skybox_faces);
+        
+        std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+        texture_cache_["skybox_cubemap"] = fallback_skybox_texture;
+        skybox_texture = fallback_skybox_texture;
     }
+    
+    // Original LDR skybox code (commented out)
+    // auto skybox_texture = std::make_shared<Texture>();
+    // std::vector<std::string> skybox_faces = {
+    //     "../assets/textures/skybox/skybox/right.jpg",   // +X
+    //     "../assets/textures/skybox/skybox/left.jpg",    // -X
+    //     "../assets/textures/skybox/skybox/top.jpg",     // +Y
+    //     "../assets/textures/skybox/skybox/bottom.jpg",  // -Y
+    //     "../assets/textures/skybox/skybox/front.jpg",   // +Z
+    //     "../assets/textures/skybox/skybox/back.jpg"     // -Z
+    // };
+    // skybox_texture->load_cubemap_from_files(skybox_faces);
     
     // Automatically compute irradiance map for the skybox
     LOG_INFO("CoroutineResourceManager: Computing irradiance map for skybox_cubemap");
@@ -907,19 +1192,23 @@ std::unique_ptr<Scene> CoroutineResourceManager::create_simple_scene() {
 
 
     // Add references to scene 
-    scene->add_model_reference("simple_scene_cube_model");
-    scene->add_model_reference("simple_scene_plane_model");
+    scene->add_renderable_reference("simple_scene_cube_renderable");
+    scene->add_renderable_reference("simple_scene_plane_renderable");
+    // Uncomment the line below to add the complex renderable (contains both cube and plane)
+    // scene->add_renderable_reference("simple_scene_complex_renderable");
     
-    // Add all light references 
-    scene->add_light_reference("directional_light_main");  // Main shadow casting light
-    scene->add_light_reference("directional_light");       // Secondary directional light
-    scene->add_light_reference("point_light_1");
-    scene->add_light_reference("point_light_2");
-    scene->add_light_reference("spot_light_1");
-    scene->add_light_reference("spot_light_2");
+    // Add active light references only (unused lights are commented out above)
+    scene->add_light_reference("directional_light_main");  // Main directional light (Sun)
+    scene->add_light_reference("point_light_1");           // Secondary fill light
     
-    // Set ambient light for the scene 
-    scene->set_ambient_light(glm::vec3(0.2f, 0.2f, 0.25f)); 
+    // COMMENTED OUT: References to unused lights
+    // scene->add_light_reference("directional_light");       // Secondary directional light
+    // scene->add_light_reference("point_light_2");           // Cool light from left
+    // scene->add_light_reference("spot_light_1");            // Spot light 1
+    // scene->add_light_reference("spot_light_2");            // Spot light 2
+    
+    // Set ambient light for the scene (reduced for IBL/HDRI skybox usage)
+    // scene->set_ambient_light(glm::vec3(0.8f, 0.8f, 0.9f));  // Softer fill light, intensity will be controlled by skybox 
 
     return scene;
 }
@@ -948,9 +1237,10 @@ std::shared_ptr<Texture> CoroutineResourceManager::compute_irradiance_map(const 
     // Create or get irradiance shader
     auto irradiance_shader = get_shader("irradiance_shader");
     if (!irradiance_shader) {
-        irradiance_shader = create_shader("irradiance_shader",
-                                        "../assets/shaders/irradiance_vertex.glsl",
-                                        "../assets/shaders/irradiance_fragment.glsl");
+        irradiance_shader = create_shader_sync("irradiance_shader", {
+            {"../assets/shaders/irradiance_vertex.glsl", GL_VERTEX_SHADER},
+            {"../assets/shaders/irradiance_fragment.glsl", GL_FRAGMENT_SHADER}
+        });
         if (!irradiance_shader) {
             LOG_ERROR("CoroutineResourceManager: Failed to create irradiance shader");
             return nullptr;
@@ -1055,12 +1345,13 @@ std::shared_ptr<Texture> CoroutineResourceManager::compute_irradiance_map(const 
     
     // Configure shader and render irradiance map
     irradiance_shader->use();
-    irradiance_shader->set_int("environmentMap", 0);
     irradiance_shader->set_mat4("projection", captureProjection);
     
-    // Bind skybox texture
-    glActiveTexture(GL_TEXTURE0);
-    skybox_texture->bind_cube_map(0);
+    // Bind skybox texture using automatic slot management
+    unsigned int skybox_slot = skybox_texture->bind_cubemap_auto();
+    if (skybox_slot != Texture::INVALID_SLOT) {
+        irradiance_shader->set_int("environmentMap", skybox_slot);
+    }
     
     glViewport(0, 0, irradiance_size, irradiance_size);
     glBindFramebuffer(GL_FRAMEBUFFER, irradiance_fbo);
@@ -1097,6 +1388,8 @@ std::shared_ptr<Texture> CoroutineResourceManager::compute_irradiance_map(const 
     return irradiance_map;
 }
 
+
+
 void CoroutineResourceManager::store_irradiance_map(const std::string& skybox_texture_name, std::shared_ptr<Texture> irradiance_map) {
     if (!irradiance_map) {
         LOG_ERROR("CoroutineResourceManager: Invalid irradiance map pointer for '{}'", skybox_texture_name);
@@ -1117,4 +1410,287 @@ std::shared_ptr<Texture> CoroutineResourceManager::get_irradiance_map(const std:
         return it->second;
     }
     return nullptr;
+}
+
+std::shared_ptr<Texture> CoroutineResourceManager::convert_equirectangular_to_cubemap(const std::string& hdr_path, int cubemap_size) {
+    LOG_INFO("CoroutineResourceManager: Converting equirectangular HDR to cubemap: {}", hdr_path);
+    
+    // Load HDR/EXR data first
+    int imgWidth, imgHeight, imgChannels;
+    float* data = nullptr;
+    
+    if (glRenderer::STBImage::is_exr_file(hdr_path.c_str())) {
+        data = glRenderer::STBImage::load_exr_image(hdr_path.c_str(), &imgWidth, &imgHeight, &imgChannels);
+    } else if (glRenderer::STBImage::is_hdr_file(hdr_path.c_str())) {
+        data = glRenderer::STBImage::load_hdr_image(hdr_path.c_str(), &imgWidth, &imgHeight, &imgChannels, 0);
+    } else {
+        LOG_ERROR("CoroutineResourceManager: Unsupported HDR file format: {}", hdr_path);
+        return nullptr;
+    }
+    
+    if (!data) {
+        LOG_ERROR("CoroutineResourceManager: Failed to load HDR data: {}", hdr_path);
+        return nullptr;
+    }
+    
+    // Create or get equirectangular to cubemap shader
+    auto equirect_shader = get_shader("equirect_to_cubemap_shader");
+    if (!equirect_shader) {
+        equirect_shader = create_shader_sync("equirect_to_cubemap_shader", {
+            {"../assets/shaders/equirect_to_cubemap_vertex.glsl", GL_VERTEX_SHADER},
+            {"../assets/shaders/equirect_to_cubemap_fragment.glsl", GL_FRAGMENT_SHADER}
+        });
+        if (!equirect_shader) {
+            LOG_ERROR("CoroutineResourceManager: Failed to create equirectangular to cubemap shader");
+            if (glRenderer::STBImage::is_exr_file(hdr_path.c_str())) {
+                glRenderer::STBImage::free_exr_image(data);
+            } else {
+                glRenderer::STBImage::free_hdr_image(data);
+            }
+            return nullptr;
+        }
+    }
+    
+    // Create temporary texture for equirectangular map
+    GLuint equirectTexture;
+    glGenTextures(1, &equirectTexture);
+    glBindTexture(GL_TEXTURE_2D, equirectTexture);
+    
+    GLenum format = (imgChannels == 3) ? GL_RGB : GL_RGBA;
+    GLenum internal_format = (imgChannels == 3) ? GL_RGB16F : GL_RGBA16F;
+    
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, imgWidth, imgHeight, 0, format, GL_FLOAT, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Create cubemap texture
+    auto cubemap_texture = std::make_shared<Texture>();
+    GLuint cubemap_fbo, cubemap_rbo;
+    
+    // Setup framebuffer for cubemap conversion
+    glGenFramebuffers(1, &cubemap_fbo);
+    glGenRenderbuffers(1, &cubemap_rbo);
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, cubemap_fbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, cubemap_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, cubemap_size, cubemap_size);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, cubemap_rbo);
+    
+    // Configure cubemap texture
+    GLuint cubemap_texture_id = cubemap_texture->get_id();
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap_texture_id);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 
+                     cubemap_size, cubemap_size, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Set up projection matrix for cubemap faces
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+    
+    // Create cube geometry for rendering
+    float cube_vertices[] = {
+        // positions          
+        -1.0f,  1.0f, -1.0f,
+        -1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+        -1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f
+    };
+    
+    GLuint cube_vao, cube_vbo;
+    glGenVertexArrays(1, &cube_vao);
+    glGenBuffers(1, &cube_vbo);
+    glBindVertexArray(cube_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, cube_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(cube_vertices), cube_vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
+    
+    // Store current viewport
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    
+    // Configure shader and render cubemap
+    equirect_shader->use();
+    equirect_shader->set_mat4("projection", captureProjection);
+    equirect_shader->set_int("equirectangularMap", 0);
+    
+    // Bind equirectangular texture
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, equirectTexture);
+    
+    glViewport(0, 0, cubemap_size, cubemap_size);
+    glBindFramebuffer(GL_FRAMEBUFFER, cubemap_fbo);
+    
+    // Render each face of the cubemap
+    for (unsigned int i = 0; i < 6; ++i) {
+        equirect_shader->set_mat4("view", captureViews[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
+                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, cubemap_texture_id, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        
+        glBindVertexArray(cube_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glBindVertexArray(0);
+    }
+    
+    // Cleanup
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &cubemap_fbo);
+    glDeleteRenderbuffers(1, &cubemap_rbo);
+    glDeleteVertexArrays(1, &cube_vao);
+    glDeleteBuffers(1, &cube_vbo);
+    glDeleteTextures(1, &equirectTexture);
+    
+    // Free the loaded data
+    if (glRenderer::STBImage::is_exr_file(hdr_path.c_str())) {
+        glRenderer::STBImage::free_exr_image(data);
+    } else {
+        glRenderer::STBImage::free_hdr_image(data);
+    }
+    
+    // Restore viewport
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    
+    // Set texture properties
+    cubemap_texture->set_dimensions(cubemap_size, cubemap_size);
+    cubemap_texture->set_channels(3);
+    cubemap_texture->set_hdr(true);
+    
+    LOG_INFO("CoroutineResourceManager: Successfully converted equirectangular HDR to cubemap: {}x{}", cubemap_size, cubemap_size);
+    return cubemap_texture;
+}
+
+// HDR/EXR skybox loading implementations
+std::shared_ptr<Texture> CoroutineResourceManager::load_hdr_skybox_cubemap(const std::string& hdr_path) {
+    LOG_INFO("CoroutineResourceManager: Loading HDR skybox cubemap: {}", hdr_path);
+    
+    std::string normalized_path = normalize_resource_path(hdr_path);
+    std::string cubemap_key = normalized_path + "_cubemap";
+    
+    // Check if already loaded as cubemap
+    {
+        std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+        auto it = texture_cache_.find(cubemap_key);
+        if (it != texture_cache_.end()) {
+            LOG_DEBUG("CoroutineResourceManager: Found cached HDR cubemap: {}", cubemap_key);
+            return it->second;
+        }
+    }
+    
+    // Load HDR/EXR and convert to cubemap
+    // Load HDR and convert to cubemap using the proper conversion function
+    auto cubemap_texture = convert_equirectangular_to_cubemap(hdr_path);
+    
+    // Cache the cubemap
+    {
+        std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+        texture_cache_[cubemap_key] = cubemap_texture;
+        LOG_DEBUG("CoroutineResourceManager: Cached HDR cubemap: {}", cubemap_key);
+    }
+    
+    LOG_INFO("CoroutineResourceManager: HDR skybox cubemap loaded successfully: {}", hdr_path);
+    return cubemap_texture;
+}
+
+Async::Task<std::shared_ptr<Texture>> CoroutineResourceManager::load_hdr_skybox_cubemap_async(const std::string& hdr_path, Async::TaskPriority priority) {
+    LOG_INFO("CoroutineResourceManager: Starting async HDR skybox cubemap load: {}", hdr_path);
+    
+    std::string normalized_path = normalize_resource_path(hdr_path);
+    std::string cubemap_key = normalized_path + "_cubemap";
+    
+    // Check cache first
+    {
+        std::shared_lock<std::shared_mutex> cache_lock(cache_mutex_);
+        auto it = texture_cache_.find(cubemap_key);
+        if (it != texture_cache_.end()) {
+            LOG_DEBUG("CoroutineResourceManager: Found cached HDR cubemap: {}", cubemap_key);
+            co_return it->second;
+        }
+    }
+    
+    if (!validate_resource_path(hdr_path)) {
+        LOG_ERROR("CoroutineResourceManager: Invalid path for HDR skybox load: {}", hdr_path);
+        co_return nullptr;
+    }
+    
+    try {
+        // Check if scheduler is available
+        if (!scheduler_) {
+            LOG_ERROR("CoroutineResourceManager: Scheduler not available for HDR skybox loading");
+            co_return nullptr;
+        }
+        
+        // Conversion requires OpenGL context, so do it on main thread
+        LOG_DEBUG("CoroutineResourceManager: Converting HDR to cubemap on main thread: {}", hdr_path);
+        auto cubemap_texture = convert_equirectangular_to_cubemap(hdr_path);
+        
+        if (cubemap_texture) {
+            // Cache result
+            {
+                std::unique_lock<std::shared_mutex> cache_lock(cache_mutex_);
+                texture_cache_[cubemap_key] = cubemap_texture;
+                LOG_DEBUG("CoroutineResourceManager: Cached HDR cubemap: {}", cubemap_key);
+            }
+        }
+        
+        LOG_INFO("CoroutineResourceManager: Async HDR skybox cubemap load completed: {}", hdr_path);
+        co_return cubemap_texture;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("CoroutineResourceManager: Exception during HDR skybox load for {}: {}", hdr_path, e.what());
+        co_return nullptr;
+    }
 }

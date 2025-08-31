@@ -8,6 +8,7 @@
 #include "Model.h"
 #include "Texture.h"
 #include "Material.h"
+#include "Renderable.h"
 #include "Task.h"
 #include "TaskPriority.h"
 #include "CoroutineThreadPoolScheduler.h"
@@ -30,8 +31,13 @@ public:
     CoroutineResourceManager(CoroutineResourceManager&&) = delete;
     CoroutineResourceManager& operator=(CoroutineResourceManager&&) = delete;
 
-    std::unique_ptr<Scene> create_simple_scene();
+    struct ShaderSource {
+        std::string path;
+        GLenum type;
+    };
 
+    std::unique_ptr<Scene> create_simple_scene();
+    
     // Load Resource
     template<typename T>
     std::shared_ptr<T> load(const std::string& path);
@@ -43,15 +49,18 @@ public:
     Async::Task<void> preload_async(const std::vector<std::string>& paths,
                                   Async::TaskPriority priority = Async::TaskPriority::k_background);
 
-    Async::Task<std::shared_ptr<Model>> assemble_model_async(const std::string& model_name,
-                                                          const std::vector<std::string>& mesh_paths,
-                                                          const std::vector<std::string>& material_paths = {},
-                                                          Async::TaskPriority priority = Async::TaskPriority::k_normal);
-
     // Model assembling 
     std::shared_ptr<Model> assemble_model(const std::string& mesh_path, const std::string& material_path);
     std::shared_ptr<Model> assumble_model(const Mesh& mesh, const Material& material);
     std::shared_ptr<Model> create_model_with_default_material(const std::string& mesh_path, const std::string& model_name);
+    
+    // Primitive mesh creation
+    std::shared_ptr<Mesh> createQuad(const std::string& quad_id = "screen_quad");
+    
+    // Enhanced model loading with textures
+    Async::Task<LoadedModelData> load_model_with_textures_async(const std::string& model_path,
+                                                               std::function<void(float, const std::string&)> progress_callback = nullptr,
+                                                               Async::TaskPriority priority = Async::TaskPriority::k_normal);
 
 
     // Get Textures from material
@@ -59,7 +68,7 @@ public:
     std::unordered_map<std::string, std::shared_ptr<Texture>> get_material_textures(const Material& material);
 
     void set_material_texture(Material& material, const std::string& texture_name, const std::string& texture_path);
-    std::vector<std::shared_ptr<Model>> get_scene_models(const class Scene& scene);
+    std::vector<std::shared_ptr<class Renderable>> get_scene_renderables(const class Scene& scene) const;
 
     std::vector<std::shared_ptr<class Light>> get_scene_lights(const class Scene& scene) const;
 
@@ -67,24 +76,33 @@ public:
     void store_material_in_cache(const std::string& material_id, std::shared_ptr<Material> material);
     void store_model_in_cache(const std::string& model_id, std::shared_ptr<Model> model);
     void store_mesh_in_cache(const std::string& mesh_id, std::shared_ptr<Mesh> mesh);
+    void store_texture_in_cache(const std::string& texture_id, std::shared_ptr<Texture> texture);
+    void store_renderable_in_cache(const std::string& renderable_id, std::shared_ptr<class Renderable> renderable);
+    
+    // Batch texture loading for models
+    void load_model_textures(const std::unordered_map<std::string, std::string>& texture_paths);
 
-    std::shared_ptr<class Shader> create_shader(const std::string& shader_name,
-                                              const std::string& vertex_path,
-                                              const std::string& fragment_path,
-                                              const std::string& geometry_path = "",
-                                              const std::string& compute_path = "");
+    // Shader creation
+    std::shared_ptr<Shader> create_shader_sync(
+        const std::string& shader_name,
+        const std::vector<ShaderSource>& sources);
 
     // Get shader
-    std::shared_ptr<class Shader> get_shader(const std::string& shader_name) const;
-
-    void store_shader(const std::string& shader_name, std::shared_ptr<class Shader> shader);
+    std::shared_ptr<Shader> get_shader(const std::string& shader_name) const;
     void remove_shader(const std::string& shader_name);
     std::vector<std::string> get_shader_names() const;
 
+    // HDR/EXR skybox loading
+    std::shared_ptr<Texture> load_hdr_skybox_cubemap(const std::string& hdr_path);
+    Async::Task<std::shared_ptr<Texture>> load_hdr_skybox_cubemap_async(const std::string& hdr_path, Async::TaskPriority priority = Async::TaskPriority::k_normal);
+    
     // Irradiance map generation and management
     std::shared_ptr<Texture> compute_irradiance_map(const std::string& skybox_texture_name, int irradiance_size = 32);
     void store_irradiance_map(const std::string& skybox_texture_name, std::shared_ptr<Texture> irradiance_map);
     std::shared_ptr<Texture> get_irradiance_map(const std::string& skybox_texture_name) const;
+    
+    // Equirectangular to cubemap conversion
+    std::shared_ptr<Texture> convert_equirectangular_to_cubemap(const std::string& hdr_path, int cubemap_size = 512);
 
     template<typename T>
     bool is_loaded(const std::string& path) const;
@@ -134,6 +152,7 @@ public:
         
     };
 
+
     StatsObserver get_stats() const;
     void reset_stats();
 
@@ -143,6 +162,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Texture>> texture_cache_;
     std::unordered_map<std::string, std::shared_ptr<Material>> material_cache_;
     std::unordered_map<std::string, std::shared_ptr<Model>> model_cache_;
+    std::unordered_map<std::string, std::shared_ptr<Renderable>> renderable_cache_;
     std::unordered_map<std::string, std::shared_ptr<Light>> light_cache_;
     std::unordered_map<std::string, std::shared_ptr<class Shader>> shader_cache_;
     std::unordered_map<std::string, std::shared_ptr<Texture>> irradiance_cache_;
@@ -166,10 +186,7 @@ private:
     mutable Stats stats_;
 
     // internal coroutine load functions
-    Async::Task<std::shared_ptr<Mesh>> load_mesh_async(const std::string& path, Async::TaskPriority priority);
     Async::Task<std::shared_ptr<Texture>> load_texture_async(const std::string& path, Async::TaskPriority priority);
-    Async::Task<std::shared_ptr<Material>> load_material_async(const std::string& path, Async::TaskPriority priority);
-    Async::Task<std::shared_ptr<Model>> load_model_async(const std::string& path, Async::TaskPriority priority);
 
     // load functions with progress callback
     Async::Task<std::shared_ptr<Mesh>> load_mesh_async(const std::string& path, 
@@ -251,6 +268,16 @@ inline std::unordered_map<std::string, std::shared_ptr<Model>>& CoroutineResourc
 template<>
 inline const std::unordered_map<std::string, std::shared_ptr<Model>>& CoroutineResourceManager::get_cache<Model>() const {
     return model_cache_;
+}
+
+template<>
+inline std::unordered_map<std::string, std::shared_ptr<Renderable>>& CoroutineResourceManager::get_cache<Renderable>() {
+    return renderable_cache_;
+}
+
+template<>
+inline const std::unordered_map<std::string, std::shared_ptr<Renderable>>& CoroutineResourceManager::get_cache<Renderable>() const {
+    return renderable_cache_;
 }
 
 template<>

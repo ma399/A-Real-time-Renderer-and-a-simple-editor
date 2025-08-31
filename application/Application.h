@@ -13,6 +13,7 @@
 #include <CoroutineResourceManager.h>
 #include <Scene.h>
 #include <Light.h>
+#include <Renderable.h>
 
 // Forward declarations
 class Model;
@@ -48,6 +49,7 @@ public:
     // File operations
     void request_model_load(const std::string& file_path);
     void check_pending_model_load();
+    void check_pending_model_with_textures_load();
 
     // Scene management operations
 
@@ -82,6 +84,7 @@ private:
     // Resource management
     std::unique_ptr<CoroutineResourceManager> resource_manager_;    
     std::optional<Async::Task<std::shared_ptr<Mesh>>> pending_model_task_;
+    std::optional<Async::Task<LoadedModelData>> pending_model_with_textures_task_;
 
     std::atomic<LoadState> load_state_;
     float last_progress_set_;                                   // Track last progress value to avoid redundant updates
@@ -101,6 +104,7 @@ private:
 
     void update_delta_time();
     void setup_event_handlers();
+    void setup_opengl_debug_output();
     void on_viewport_resize(int width, int height);
     void calculate_initial_viewport();
     

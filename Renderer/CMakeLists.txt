@@ -45,7 +45,7 @@ set(RENDERING_SOURCES
     rendering/src/Material.cpp
     rendering/src/Mesh.cpp
     rendering/src/Model.cpp
-
+    rendering/src/Renderable.cpp
     rendering/src/Renderer.cpp
     rendering/src/Scene.cpp
     rendering/src/Shader.cpp
@@ -60,7 +60,7 @@ set(RENDERING_HEADERS
     rendering/include/Material.h
     rendering/include/Mesh.h
     rendering/include/Model.h
-
+    rendering/include/Renderable.h
     rendering/include/Renderer.h
     rendering/include/Scene.h
     rendering/include/Shader.h
@@ -85,6 +85,7 @@ target_link_libraries(Renderer PUBLIC
     glad::glad
     imgui::imgui
     stb::stb
+    tinyexr::tinyexr
     spdlog::spdlog
     assimp::assimp
     ${OPENGL_LIBRARIES}

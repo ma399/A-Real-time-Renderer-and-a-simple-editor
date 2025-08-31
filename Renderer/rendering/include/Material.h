@@ -104,15 +104,9 @@ public:
     // Shader integration methods
     void set_shader(const class Shader& shader, const std::string& name = "material") const;
     void set_shader_pbr(const class Shader& shader, const std::string& prefix = "") const;
-    void bind_textures(const class Shader& shader, const class CoroutineResourceManager& resource_manager) const;
-    void bind_textures(const class Shader& shader, const class CoroutineResourceManager& resource_manager, 
-                      const std::unordered_map<std::string, unsigned int>& texture_slots) const;
-
-    // Texture slot operations (using texture paths)
-    void set_texture_at_slot(unsigned int slot, const std::string& texture_path);
-    std::shared_ptr<Texture> get_texture_at_slot(unsigned int slot) const;
-    const std::string& get_texture_path_at_slot(unsigned int slot) const;
-    bool has_texture_at_slot(unsigned int slot) const;
+    
+    // Simplified automatic texture binding using Texture's built-in slot management
+    void bind_textures_auto(const class Shader& shader, const class CoroutineResourceManager& resource_manager) const;
 
     // Material preset creation (Legacy)
     static Material create_default();
@@ -147,7 +141,7 @@ private:
     float heightScale;
     bool pbrEnabled;
 
-    // Enhanced texture storage with named slots (using paths)
+    // Enhanced texture storage with named slots 
     std::unordered_map<std::string, std::string> namedTexturePaths;
     
     // Legacy texture paths (for backward compatibility)

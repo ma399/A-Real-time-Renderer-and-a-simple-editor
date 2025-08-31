@@ -13,6 +13,7 @@ This project uses the following third-party libraries:
 - **Assimp** - 3D model loading library
 - **ImGui** - Immediate mode GUI library
 - **STB** - Image loading library
+- **TinyEXR** - EXR/HDR image format loading library
 - **spdlog** - High-performance logging library
 
 All dependencies are automatically downloaded and built via CMake's FetchContent, no manual installation required.
@@ -165,13 +166,17 @@ classDiagram
 
     %% Scene Management
     class Scene {
-        -vector model_references_
+        -vector renderable_references_
         -vector light_references_
         -vec3 ambient_light_
-        +add_model_reference(id) void
+        +add_renderable_reference(id) void
+        +remove_renderable_reference(id) void
         +add_light_reference(id) void
-        +get_model_references() vector
+        +remove_light_reference(id) void
+        +get_renderable_references() vector
         +get_light_references() vector
+        +get_renderable_count() size_t
+        +get_light_count() size_t
         +is_empty() bool
     }
 
@@ -181,6 +186,7 @@ classDiagram
         -unordered_map texture_cache_
         -unordered_map material_cache_
         -unordered_map model_cache_
+        -unordered_map renderable_cache_
         -unordered_map light_cache_
         -unordered_map shader_cache_
         -CoroutineThreadPoolScheduler scheduler_
@@ -189,8 +195,9 @@ classDiagram
         +load_async(path, callback, priority) Task
         +assemble_model(mesh_path, material_path) shared_ptr
         +create_shader(name, vertex, fragment) shared_ptr
-        +get_scene_models(scene) vector
+        +get_scene_renderables(scene) vector
         +get_scene_lights(scene) vector
+        +store_renderable_in_cache(id, renderable) void
     }
 
     %% Coroutine Threading System
@@ -219,6 +226,24 @@ classDiagram
     }
 
     %% Graphics Resources
+    class Renderable {
+        -string id_
+        -vector model_ids_
+        -bool visible_
+        -string material_override_
+        +add_model(model_id) void
+        +remove_model(model_id) void
+        +get_model_ids() vector
+        +has_models() bool
+        +set_visible(visible) void
+        +is_visible() bool
+        +set_material_override(material_id) void
+        +clear_material_override() void
+        +get_material_override() string
+        +has_material_override() bool
+        +get_id() string
+    }
+
     class Model {
         -Mesh* mesh_
         -Material* material_
@@ -395,6 +420,7 @@ classDiagram
 
     CoroutineResourceManager --> CoroutineThreadPoolScheduler : uses
     CoroutineResourceManager --> AssimpLoader : contains
+    CoroutineResourceManager --> Renderable : manages
     CoroutineResourceManager --> Model : manages
     CoroutineResourceManager --> Texture : manages
     CoroutineResourceManager --> Material : manages
@@ -403,10 +429,11 @@ classDiagram
 
     CoroutineThreadPoolScheduler --> EnhancedThreadPool : contains
 
+    Renderable --> Model : references
     Model --> Mesh : contains
     Model --> Material : contains
 
-    Scene --> Model : references
+    Scene --> Renderable : references
     Scene --> Light : references
 
     InputManager --> Camera : controls
@@ -425,6 +452,6 @@ The system follows a layered architecture design with the following core layers:
 
 1. **Application Layer**: Manages overall application lifecycle and user interactions
 2. **Rendering Core**: Implements modern graphics rendering pipeline with deferred rendering and global illumination
-3. **Resource Management**: Coroutine-based asynchronous resource loading and caching system
-4. **Graphics Resources**: Encapsulates OpenGL objects with type-safe interfaces（Partially Achieved）
+3. **Resource Management**: Coroutine-based asynchronous resource loading and caching system, managing renderables, models, materials and other resources
+4. **Graphics Resources**: Encapsulates OpenGL objects with type-safe interfaces. The Renderable class serves as an abstraction for renderable objects in the scene, supporting multiple models with visibility control and material overrides
 5. **Input/Output**: Handles user input and GUI rendering
