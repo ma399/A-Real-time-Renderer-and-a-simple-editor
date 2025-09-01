@@ -75,10 +75,7 @@ private:
     // viewport size tracking
     int last_viewport_width_;
     int last_viewport_height_;    
-
-    // Dialog managers
-    // std::unique_ptr<LoadingDialog> loadingDialog_;
-    
+   
     // render
     void render_viewport();
     void render_controls();
