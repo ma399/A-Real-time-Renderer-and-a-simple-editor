@@ -20,6 +20,7 @@ uniform mat4 lightSpaceMatrix;
 
 // IBL textures
 uniform samplerCube irradianceMap;
+uniform samplerCube prefilteredMap;
 uniform bool useIBL;
 
 // Camera
@@ -306,9 +307,9 @@ void main()
         float NdotL = max(dot(N, L), 0.0);
         
         // Shadow calculation 
-        float shadow = 0.0;
+        float shadow = 1.0;  // Default to fully lit (no shadow)
         
-        if (enableShadows && i == 0 && lightTypes[i] == 0) {  // Apply shadow only to first directional light
+        if (i == 0 && lightTypes[i] == 0) {  // Apply shadows to first directional light
             vec4 fragPosLightSpace = lightSpaceMatrix * vec4(WorldPos, 1.0);
             shadow = ShadowCalculation(fragPosLightSpace, N, L);
         }
@@ -329,8 +330,14 @@ void main()
         
         vec3 diffuse_ambient = irradiance * albedo;
         
-        // TODO: Enhanced with prefiltered environment map)
-        vec3 specular_ambient = irradiance * F_ambient * (1.0 - roughness) * 0.5;
+        // Use prefiltered environment map for specular IBL
+        vec3 R = reflect(-V, N);
+        const float MAX_REFLECTION_LOD = 4.0;
+        vec3 prefilteredColor = textureLod(prefilteredMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+        
+        // Approximate BRDF integration (simplified Schlick approximation)
+        vec3 F_schlick = F_ambient + (max(vec3(1.0 - roughness), F_ambient) - F_ambient) * pow(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0), 5.0);
+        vec3 specular_ambient = prefilteredColor * F_schlick;
         
         ambient = (kD_ambient * diffuse_ambient + specular_ambient) * ao;
     } else {

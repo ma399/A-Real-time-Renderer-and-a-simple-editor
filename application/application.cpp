@@ -17,7 +17,14 @@ Application::Application(const std::string& title)
      load_state_(LoadState::kIdle),
      last_progress_set_(-1.0f),
      initialized_(false),
-     gbuffer_debug_mode_(-1) {
+     gbuffer_debug_mode_(-1),
+     ssgi_exposure_(0.1f),
+     ssgi_intensity_(1.0f),
+     ssgi_max_steps_(32),
+     ssgi_max_distance_(6.0f),
+     ssgi_step_size_(0.15f),
+     ssgi_thickness_(0.6f),
+     ssgi_num_samples_(8) {
 }
 
 Application::~Application() {
@@ -145,6 +152,36 @@ bool Application::initialize(){
             [this]() -> std::vector<std::string> { return this->get_model_names(); },
             [this]() -> std::vector<std::string> { return this->get_material_names(); }
         );
+        
+        // Set up SSGI parameter callbacks
+        ui_->set_ssgi_exposure_callback([this](float exposure) {
+            this->set_ssgi_exposure(exposure);
+        });
+        
+        ui_->set_ssgi_intensity_callback([this](float intensity) {
+            this->set_ssgi_intensity(intensity);
+        });
+        
+        // Set up SSGI compute parameter callbacks
+        ui_->set_ssgi_max_steps_callback([this](int max_steps) {
+            this->set_ssgi_max_steps(max_steps);
+        });
+        
+        ui_->set_ssgi_max_distance_callback([this](float max_distance) {
+            this->set_ssgi_max_distance(max_distance);
+        });
+        
+        ui_->set_ssgi_step_size_callback([this](float step_size) {
+            this->set_ssgi_step_size(step_size);
+        });
+        
+        ui_->set_ssgi_thickness_callback([this](float thickness) {
+            this->set_ssgi_thickness(thickness);
+        });
+        
+        ui_->set_ssgi_num_samples_callback([this](int num_samples) {
+            this->set_ssgi_num_samples(num_samples);
+        });
 
         setup_opengl_debug_output();
 
@@ -681,7 +718,7 @@ void Application::check_pending_model_with_textures_load() {
                     
                     Transform renderable_transform;
                     renderable_transform.set_position(center_position);
-                    renderable_transform.set_scale(0.001f); 
+                    renderable_transform.set_scale(0.003f); 
                     
                     transform_manager->set_transform(current_loading_model_name_, renderable_transform);
                     
@@ -729,4 +766,58 @@ void Application::check_pending_model_with_textures_load() {
     }
 }
 
+void Application::set_ssgi_exposure(float exposure) {
+    ssgi_exposure_ = exposure;
+    if (renderer_) {
+        renderer_->set_ssgi_exposure(exposure);
+    }
+    LOG_DEBUG("Application: SSGI exposure set to {}", exposure);
+}
 
+void Application::set_ssgi_intensity(float intensity) {
+    ssgi_intensity_ = intensity;
+    if (renderer_) {
+        renderer_->set_ssgi_intensity(intensity);
+    }
+    LOG_DEBUG("Application: SSGI intensity set to {}", intensity);
+}
+
+void Application::set_ssgi_max_steps(int max_steps) {
+    ssgi_max_steps_ = max_steps;
+    if (renderer_) {
+        renderer_->set_ssgi_max_steps(max_steps);
+    }
+    LOG_DEBUG("Application: SSGI max steps set to {}", max_steps);
+}
+
+void Application::set_ssgi_max_distance(float max_distance) {
+    ssgi_max_distance_ = max_distance;
+    if (renderer_) {
+        renderer_->set_ssgi_max_distance(max_distance);
+    }
+    LOG_DEBUG("Application: SSGI max distance set to {}", max_distance);
+}
+
+void Application::set_ssgi_step_size(float step_size) {
+    ssgi_step_size_ = step_size;
+    if (renderer_) {
+        renderer_->set_ssgi_step_size(step_size);
+    }
+    LOG_DEBUG("Application: SSGI step size set to {}", step_size);
+}
+
+void Application::set_ssgi_thickness(float thickness) {
+    ssgi_thickness_ = thickness;
+    if (renderer_) {
+        renderer_->set_ssgi_thickness(thickness);
+    }
+    LOG_DEBUG("Application: SSGI thickness set to {}", thickness);
+}
+
+void Application::set_ssgi_num_samples(int num_samples) {
+    ssgi_num_samples_ = num_samples;
+    if (renderer_) {
+        renderer_->set_ssgi_num_samples(num_samples);
+    }
+    LOG_DEBUG("Application: SSGI num samples set to {}", num_samples);
+}

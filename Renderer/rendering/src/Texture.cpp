@@ -173,11 +173,14 @@ void Texture::load_cubemap_from_files(const std::vector<std::string>& faces) {
     }
     
     // Set cubemap parameters
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    
+    // Generate mipmaps for smooth filtering
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
     
     std::cout << "Successfully loaded cubemap with " << faces.size() << " faces" << std::endl;
 }
@@ -368,8 +371,24 @@ void Texture::load_exr_from_file(const std::string& path) {
     
     glBindTexture(GL_TEXTURE_2D, texture_id_);
     
-    // EXR is always RGBA (4 channels) with floating-point data
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width_, height_, 0, GL_RGBA, GL_FLOAT, data);
+    // EXR can have different channel counts, handle accordingly
+    GLenum format, internal_format;
+    if (nr_channels_ == 1) {
+        format = GL_RED;
+        internal_format = GL_R16F;
+    } else if (nr_channels_ == 3) {
+        format = GL_RGB;
+        internal_format = GL_RGB16F;
+    } else if (nr_channels_ == 4) {
+        format = GL_RGBA;
+        internal_format = GL_RGBA16F;
+    } else {
+        std::cerr << "Unsupported EXR channel count: " << nr_channels_ << std::endl;
+        glRenderer::STBImage::free_exr_image(data);
+        return;
+    }
+    
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width_, height_, 0, format, GL_FLOAT, data);
     glGenerateMipmap(GL_TEXTURE_2D);
     
     // Set texture parameters suitable for HDR
@@ -421,8 +440,11 @@ void Texture::convert_equirectangular_to_cubemap(float* hdr_data, int width, int
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Generate mipmaps for smooth filtering
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
     
     // Store cubemap dimensions
     width_ = cubemap_size;

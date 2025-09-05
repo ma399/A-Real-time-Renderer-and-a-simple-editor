@@ -101,6 +101,11 @@ public:
     void store_irradiance_map(const std::string& skybox_texture_name, std::shared_ptr<Texture> irradiance_map);
     std::shared_ptr<Texture> get_irradiance_map(const std::string& skybox_texture_name) const;
     
+    // Prefiltered environment map for specular IBL
+    std::shared_ptr<Texture> compute_prefiltered_map(const std::string& skybox_texture_name, int prefilter_size = 128);
+    void store_prefiltered_map(const std::string& skybox_texture_name, std::shared_ptr<Texture> prefiltered_map);
+    std::shared_ptr<Texture> get_prefiltered_map(const std::string& skybox_texture_name) const;
+    
     // Equirectangular to cubemap conversion
     std::shared_ptr<Texture> convert_equirectangular_to_cubemap(const std::string& hdr_path, int cubemap_size = 512);
 
@@ -109,9 +114,7 @@ public:
 
     template<typename T>
     std::shared_ptr<T> get(const std::string& path) const;
-    
-    // Specialized get method for models that doesn't normalize composite IDs
-    //std::shared_ptr<Model> get_model(const std::string& model_id) const;
+
 
     template<typename T>
     void unload(const std::string& path);
@@ -166,6 +169,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Light>> light_cache_;
     std::unordered_map<std::string, std::shared_ptr<class Shader>> shader_cache_;
     std::unordered_map<std::string, std::shared_ptr<Texture>> irradiance_cache_;
+    std::unordered_map<std::string, std::shared_ptr<Texture>> prefiltered_cache_;
 
     // Task cache
     std::unordered_map<std::string, std::shared_ptr<Async::Task<std::shared_ptr<Mesh>>>> mesh_task_cache_;

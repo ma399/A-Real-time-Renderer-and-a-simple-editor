@@ -209,7 +209,7 @@ void main() {
     
     // Apply A-Trous filter for additional smoothing
     // You can adjust the step size for different levels of denoising
-    // denoisedColor = atrousFilter(uv, 1);
+    denoisedColor = atrousFilter(uv, 1);
     
     // Apply temporal filter if enabled
     if (enableTemporalFilter) {

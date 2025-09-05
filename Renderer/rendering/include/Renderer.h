@@ -81,6 +81,13 @@ namespace glRenderer {
         void SSGI_render(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager);
         void set_ssgi_enabled(bool enable);
         bool is_ssgi_enabled() const { return use_ssgi_; }
+        void set_ssgi_exposure(float exposure);
+        void set_ssgi_intensity(float intensity);
+        void set_ssgi_max_steps(int max_steps);
+        void set_ssgi_max_distance(float max_distance);
+        void set_ssgi_step_size(float step_size);
+        void set_ssgi_thickness(float thickness);
+        void set_ssgi_num_samples(int num_samples);
         
         // SSGI pipeline functions
         void render_direct_lighting_pass(const Scene& scene, const Camera& camera, const CoroutineResourceManager& resource_manager);
@@ -138,6 +145,13 @@ namespace glRenderer {
         std::unique_ptr<Texture> ssgi_prev_texture_;      // Previous frame SSGI for temporal accumulation
         std::unique_ptr<Texture> lit_scene_texture_;      // Direct lighting only 
         bool use_ssgi_;
+        float ssgi_exposure_;
+        float ssgi_intensity_;
+        int ssgi_max_steps_;
+        float ssgi_max_distance_;
+        float ssgi_step_size_;
+        float ssgi_thickness_;
+        int ssgi_num_samples_;
         
         // Hi-Z Buffer for accelerated ray marching
         GLuint hiz_textures_[2];        // Hi-Z pyramid ping-pong textures

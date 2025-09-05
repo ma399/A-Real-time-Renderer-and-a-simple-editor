@@ -1189,6 +1189,15 @@ std::unique_ptr<Scene> CoroutineResourceManager::create_simple_scene() {
     } else {
         LOG_ERROR("CoroutineResourceManager: Failed to compute irradiance map");
     }
+    
+    // Automatically compute prefiltered environment map for the skybox
+    LOG_INFO("CoroutineResourceManager: Computing prefiltered environment map for skybox_cubemap");
+    auto prefiltered_map = compute_prefiltered_map("skybox_cubemap", 128);
+    if (prefiltered_map) {
+        LOG_INFO("CoroutineResourceManager: Successfully computed prefiltered environment map");
+    } else {
+        LOG_ERROR("CoroutineResourceManager: Failed to compute prefiltered environment map");
+    }
 
 
     // Add references to scene 
@@ -1270,18 +1279,21 @@ std::shared_ptr<Texture> CoroutineResourceManager::compute_irradiance_map(const 
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Generate mipmaps for smooth filtering across distances
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
     
     // Setup projection and view matrices for cubemap faces
     glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
     glm::mat4 captureViews[] = {
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f,  1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f,  1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f,  1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f,  1.0f,  0.0f))
     };
     
     // Setup cube geometry for rendering
@@ -1368,6 +1380,10 @@ std::shared_ptr<Texture> CoroutineResourceManager::compute_irradiance_map(const 
         glBindVertexArray(0);
     }
     
+    // Generate mipmaps after rendering all faces
+    glBindTexture(GL_TEXTURE_CUBE_MAP, irradiance_texture_id);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    
     // Cleanup
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &irradiance_fbo);
@@ -1407,6 +1423,228 @@ std::shared_ptr<Texture> CoroutineResourceManager::get_irradiance_map(const std:
     std::shared_lock<std::shared_mutex> lock(cache_mutex_);
     auto it = irradiance_cache_.find(irradiance_key);
     if (it != irradiance_cache_.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Texture> CoroutineResourceManager::compute_prefiltered_map(const std::string& skybox_texture_name, int prefilter_size) {
+    LOG_INFO("CoroutineResourceManager: Computing prefiltered environment map for skybox: {}", skybox_texture_name);
+    
+    // Check if already computed
+    std::string prefilter_key = skybox_texture_name + "_prefiltered";
+    {
+        std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+        auto it = prefiltered_cache_.find(prefilter_key);
+        if (it != prefiltered_cache_.end()) {
+            LOG_DEBUG("CoroutineResourceManager: Found cached prefiltered map: {}", prefilter_key);
+            return it->second;
+        }
+    }
+    
+    // Get the skybox texture
+    auto skybox_texture = get<Texture>(skybox_texture_name);
+    if (!skybox_texture) {
+        LOG_ERROR("CoroutineResourceManager: Skybox texture '{}' not found for prefilter computation", skybox_texture_name);
+        return nullptr;
+    }
+    
+    // Create or get prefilter shader
+    auto prefilter_shader = get_shader("prefilter_shader");
+    if (!prefilter_shader) {
+        prefilter_shader = create_shader_sync("prefilter_shader", {
+            {"../assets/shaders/prefilter_vertex.glsl", GL_VERTEX_SHADER},
+            {"../assets/shaders/prefilter_fragment.glsl", GL_FRAGMENT_SHADER}
+        });
+        if (!prefilter_shader) {
+            LOG_ERROR("CoroutineResourceManager: Failed to create prefilter shader");
+            return nullptr;
+        }
+    }
+    
+    // Create prefiltered cubemap texture
+    auto prefiltered_map = std::make_shared<Texture>();
+    GLuint prefilter_fbo, prefilter_rbo;
+    
+    // Setup framebuffer for prefilter rendering
+    glGenFramebuffers(1, &prefilter_fbo);
+    glGenRenderbuffers(1, &prefilter_rbo);
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, prefilter_fbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, prefilter_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, prefilter_size, prefilter_size);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, prefilter_rbo);
+    
+    // Configure prefiltered cubemap texture
+    GLuint prefilter_texture_id = prefiltered_map->get_id();
+    glBindTexture(GL_TEXTURE_CUBE_MAP, prefilter_texture_id);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 
+                     prefilter_size, prefilter_size, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Generate mipmaps for different roughness levels
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    
+    // Setup projection and view matrices for cubemap faces
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f,  1.0f,  0.0f)), // +X (right)
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f,  1.0f,  0.0f)), // -X (left)
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)), // +Y (top) - corrected
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)), // -Y (bottom) - corrected
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f,  1.0f,  0.0f)), // +Z (front)
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f,  1.0f,  0.0f))  // -Z (back)
+    };
+    
+    // Create cube geometry for rendering (reuse from irradiance computation)
+    float cube_vertices[] = {
+        // positions          
+        -1.0f,  1.0f, -1.0f,
+        -1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+        -1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f
+    };
+    
+    GLuint cube_vao, cube_vbo;
+    glGenVertexArrays(1, &cube_vao);
+    glGenBuffers(1, &cube_vbo);
+    glBindVertexArray(cube_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, cube_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(cube_vertices), cube_vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
+    
+    // Store current viewport
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    
+    // Configure shader and render prefiltered map
+    prefilter_shader->use();
+    prefilter_shader->set_mat4("projection", captureProjection);
+    
+    // Bind skybox texture using automatic slot management
+    unsigned int skybox_slot = skybox_texture->bind_cubemap_auto();
+    if (skybox_slot != Texture::INVALID_SLOT) {
+        prefilter_shader->set_int("environmentMap", skybox_slot);
+    } else {
+        LOG_ERROR("CoroutineResourceManager: Failed to bind skybox texture for prefilter computation");
+        return nullptr;
+    }
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, prefilter_fbo);
+    
+    // Render prefiltered map for different roughness levels (mip levels)
+    unsigned int maxMipLevels = 5;
+    for (unsigned int mip = 0; mip < maxMipLevels; ++mip) {
+        // Resize framebuffer according to mip-level size
+        unsigned int mipWidth  = static_cast<unsigned int>(prefilter_size * std::pow(0.5, mip));
+        unsigned int mipHeight = static_cast<unsigned int>(prefilter_size * std::pow(0.5, mip));
+        glBindRenderbuffer(GL_RENDERBUFFER, prefilter_rbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipWidth, mipHeight);
+        glViewport(0, 0, mipWidth, mipHeight);
+
+        float roughness = (float)mip / (float)(maxMipLevels - 1);
+        prefilter_shader->set_float("roughness", roughness);
+        
+        // Render each face of the cubemap for this mip level
+        for (unsigned int i = 0; i < 6; ++i) {
+            prefilter_shader->set_mat4("view", captureViews[i]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
+                                   GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, prefilter_texture_id, mip);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            
+            glBindVertexArray(cube_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+        }
+    }
+    
+    // Cleanup
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &prefilter_fbo);
+    glDeleteRenderbuffers(1, &prefilter_rbo);
+    glDeleteVertexArrays(1, &cube_vao);
+    glDeleteBuffers(1, &cube_vbo);
+    
+    // Restore viewport
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    
+    // Set texture properties
+    prefiltered_map->set_dimensions(prefilter_size, prefilter_size);
+    prefiltered_map->set_channels(3);
+    prefiltered_map->set_hdr(true);
+    
+    // Store in cache
+    {
+        std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+        prefiltered_cache_[prefilter_key] = prefiltered_map;
+    }
+    
+    LOG_INFO("CoroutineResourceManager: Successfully computed prefiltered environment map for: {}", skybox_texture_name);
+    return prefiltered_map;
+}
+
+void CoroutineResourceManager::store_prefiltered_map(const std::string& skybox_texture_name, std::shared_ptr<Texture> prefiltered_map) {
+    if (!prefiltered_map) {
+        LOG_ERROR("CoroutineResourceManager: Invalid prefiltered map pointer for '{}'", skybox_texture_name);
+        return;
+    }
+    
+    std::string prefilter_key = skybox_texture_name + "_prefiltered";
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    prefiltered_cache_[prefilter_key] = prefiltered_map;
+    LOG_INFO("CoroutineResourceManager: Stored prefiltered map for skybox: {}", skybox_texture_name);
+}
+
+std::shared_ptr<Texture> CoroutineResourceManager::get_prefiltered_map(const std::string& skybox_texture_name) const {
+    std::string prefilter_key = skybox_texture_name + "_prefiltered";
+    std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+    auto it = prefiltered_cache_.find(prefilter_key);
+    if (it != prefiltered_cache_.end()) {
         return it->second;
     }
     return nullptr;
@@ -1459,6 +1697,8 @@ std::shared_ptr<Texture> CoroutineResourceManager::convert_equirectangular_to_cu
     GLenum format = (imgChannels == 3) ? GL_RGB : GL_RGBA;
     GLenum internal_format = (imgChannels == 3) ? GL_RGB16F : GL_RGBA16F;
     
+    LOG_DEBUG("CoroutineResourceManager: EXR image loaded - {}x{} with {} channels", imgWidth, imgHeight, imgChannels);
+    
     glTexImage2D(GL_TEXTURE_2D, 0, internal_format, imgWidth, imgHeight, 0, format, GL_FLOAT, data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -1488,18 +1728,21 @@ std::shared_ptr<Texture> CoroutineResourceManager::convert_equirectangular_to_cu
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // Generate mipmaps for smooth filtering across distances
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
     
     // Set up projection matrix for cubemap faces
     glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
     glm::mat4 captureViews[] = {
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f,  1.0f,  0.0f)), // +X (right)
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f,  1.0f,  0.0f)), // -X (left)
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)), // +Y (top) - corrected
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)), // -Y (bottom) - corrected
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f,  1.0f,  0.0f)), // +Z (front)
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f,  1.0f,  0.0f))  // -Z (back)
     };
     
     // Create cube geometry for rendering
@@ -1585,6 +1828,10 @@ std::shared_ptr<Texture> CoroutineResourceManager::convert_equirectangular_to_cu
         glDrawArrays(GL_TRIANGLES, 0, 36);
         glBindVertexArray(0);
     }
+    
+    // Generate mipmaps after rendering all faces
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap_texture_id);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
     
     // Cleanup
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

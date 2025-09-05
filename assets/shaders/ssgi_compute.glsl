@@ -87,8 +87,8 @@ vec3 screenSpaceRayMarchHiZ(vec3 rayOrigin, vec3 rayDir, out bool hit) {
         }
         
         // Step 3: Query pyramid - Select appropriate mip level based on step distance
-        // Farther distances can use lower mip levels (larger sampling range)
-        int mipLevel = clamp(int(log2(max(1.0, t / (stepSize * 2.0)))), 0, maxMipLevel);
+        // Balanced mip level selection for performance
+        int mipLevel = clamp(int(log2(max(1.0, t / (stepSize * 3.0)))), 0, maxMipLevel);
         
         // Sample Hi-Z pyramid at selected mip level
         float hizDepth = textureLod(hizTexture, screenUV, float(mipLevel)).r;
@@ -101,7 +101,7 @@ vec3 screenSpaceRayMarchHiZ(vec3 rayOrigin, vec3 rayDir, out bool hit) {
         if (rayDepth < hizDepth) {
             // Ray depth < region max depth: entire region is "empty"
             // Safe to perform large step jump, skip empty space efficiently
-            float jumpDistance = stepSize * pow(2.0, float(mipLevel));
+            float jumpDistance = stepSize * max(1.0, pow(1.8, float(mipLevel))); // Balanced jumps
             t += jumpDistance;
             currentPos = viewOrigin.xyz + rayDirection * t;
         } else {
@@ -119,7 +119,7 @@ vec3 screenSpaceRayMarchHiZ(vec3 rayOrigin, vec3 rayDir, out bool hit) {
                     return vec3(screenUV, actualDepth);
                 } else {
                     // No intersection, take small step forward
-                    t += stepSize * 0.5;
+                    t += stepSize * 0.5; // Balanced step for precision vs performance
                     currentPos = viewOrigin.xyz + rayDirection * t;
                 }
             } else {
@@ -159,9 +159,10 @@ void main() {
     // float ao = motionAO.z;
     float ao = 1.0;
     
-    // Skip background pixels
+    // Handle background pixels with minimal ambient
     if (positionData.w < 0.5) {
-        imageStore(ssgi_raw_texture, texelCoord, vec4(0.0));
+        vec3 backgroundAmbient = albedo * 0.02 * intensity; // Very small ambient for background
+        imageStore(ssgi_raw_texture, texelCoord, vec4(backgroundAmbient, 1.0));
         return;
     }
     
@@ -185,7 +186,7 @@ void main() {
         // Perform Hi-Z accelerated screen space ray march
         bool hit;
         vec3 hitResult = screenSpaceRayMarchHiZ(worldPos, sampleDir, hit);
-        
+
         if (hit) {
             vec2 hitUV = hitResult.xy;
             
@@ -207,7 +208,7 @@ void main() {
         indirectColor = (indirectColor / totalWeight) * intensity * ao;
     } else {
         // Fallback: small ambient contribution if no indirect lighting found
-        indirectColor = albedo * 0.02 * ao; // Very small ambient
+        indirectColor = vec3(0.0); // Scale with intensity parameter
     }
     
     // Store result

@@ -18,6 +18,7 @@ uniform bool enableSSAO;
 
 // Environment lighting
 uniform samplerCube irradianceMap;
+uniform samplerCube prefilteredMap;
 uniform samplerCube skyboxTexture;
 uniform bool useIBL;
 uniform bool useSkybox;
@@ -31,10 +32,38 @@ uniform mat4 invProjection;
 // SSGI controls
 uniform bool enableSSGI;
 uniform float ssgiIntensity;
+uniform float exposure;
 
 // PBR functions for environment lighting
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 ACESFitted(vec3 color) {
+    // sRGB to ACEScg
+    const mat3 sRGB_to_ACEScg = mat3(
+        0.59719, 0.35458, 0.04823,
+        0.07600, 0.90834, 0.01566,
+        0.02840, 0.13383, 0.83777
+    );
+
+    // ACEScg to sRGB
+    const mat3 ACEScg_to_sRGB = mat3(
+        1.60475, -0.53108, -0.07367,
+        -0.10208,  1.10813, -0.00605,
+        -0.00327, -0.07276,  1.07602
+    );
+
+    // 1. Convert from sRGB linear to ACEScg
+    vec3 aces_color = sRGB_to_ACEScg * color;
+
+    // 2. Apply the RRT + ODT curve
+    aces_color = (aces_color * (aces_color + 0.0245786) - 0.000090537) / (aces_color * (aces_color * 0.983729 + 0.4329510) + 0.238081);
+
+    // 3. Convert from ACEScg to sRGB linear
+    vec3 result = ACEScg_to_sRGB * aces_color; 
+    // Clamp the result to [0, 1] range
+    return clamp(result, 0.0, 1.0);
 }
 
 void main() {
@@ -48,7 +77,6 @@ void main() {
     vec4 motionAO = texture(gMotionAO, uv);
     
     // Check if this is a background pixel - skip composition for background
-    // (skybox is already rendered to framebuffer)
     if (positionData.w < 0.5) {
         discard; // Let the skybox show through
     }
@@ -95,15 +123,16 @@ void main() {
         // Use precomputed irradiance map for diffuse IBL
         vec3 irradiance = texture(irradianceMap, N).rgb;
         
-        // Ensure irradiance has some minimum value
-        if (length(irradiance) < 0.01) {
-            irradiance = vec3(0.1, 0.1, 0.1); // Fallback to gray
-        }
-        
         vec3 diffuse_ambient = irradiance * albedo;
         
-        // Simplified specular ambient (could be enhanced with prefiltered environment map)
-        vec3 specular_ambient = irradiance * F_ambient * (1.0 - roughness) * 0.5;
+        // Use prefiltered environment map for specular IBL
+        vec3 R = reflect(-V, N);
+        const float MAX_REFLECTION_LOD = 4.0;
+        vec3 prefilteredColor = textureLod(prefilteredMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+        
+        // Approximate BRDF integration (simplified Schlick approximation)
+        vec3 F_schlick = F_ambient + (max(vec3(1.0 - roughness), F_ambient) - F_ambient) * pow(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0), 5.0);
+        vec3 specular_ambient = prefilteredColor * F_schlick;
         
         environmentLighting = (kD_ambient * diffuse_ambient + specular_ambient);
     } else {
@@ -114,17 +143,16 @@ void main() {
         environmentLighting = (kD_ambient * diffuse_ambient + specular_ambient);
     }
     
-    // Apply AO to lighting components (but not emissive)
-    vec3 finalColor = (directLighting + indirectLighting + environmentLighting) * ao + emissiveColor;
+    // Apply AO to lighting components
+    vec3 finalColor = directLighting + (indirectLighting + environmentLighting) * ao + emissiveColor;
+
+    // vec3 finalColor = (directLighting + indirectLighting + environmentLighting * 0.01) + emissiveColor;
     
-    // Ensure minimum visibility
-    if (length(finalColor) < 0.1) {
-        finalColor = albedo * 0.3;
-    }
-    
+
     // HDR tone mapping and gamma correction
-    finalColor = finalColor / (finalColor + vec3(1.0));
+    // finalColor = finalColor / (finalColor + vec3(1.0));
+    finalColor = ACESFitted(finalColor * exposure);
     finalColor = pow(finalColor, vec3(1.0/2.2));
-    
+
     FragColor = vec4(finalColor, 1.0);
 }

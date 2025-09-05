@@ -26,6 +26,13 @@ public:
     void set_obj_import_callback(std::function<void(const std::string&)> callback);
     void set_viewport_resize_callback(std::function<void(int, int)> callback);
     void set_model_add_callback(std::function<void(const std::string&)> callback);
+    void set_ssgi_exposure_callback(std::function<void(float)> callback);
+    void set_ssgi_intensity_callback(std::function<void(float)> callback);
+    void set_ssgi_max_steps_callback(std::function<void(int)> callback);
+    void set_ssgi_max_distance_callback(std::function<void(float)> callback);
+    void set_ssgi_step_size_callback(std::function<void(float)> callback);
+    void set_ssgi_thickness_callback(std::function<void(float)> callback);
+    void set_ssgi_num_samples_callback(std::function<void(int)> callback);
     void update_fonts_for_window_size(int window_width, int window_height);
     bool needs_render() const { return needs_render_; }
     void reset_render_flag() { needs_render_ = false; }
@@ -58,6 +65,13 @@ private:
     std::function<void(const std::string&)> importCallback_;
     std::function<void(int, int)> viewportResizeCallback_;
     std::function<void(const std::string&)> modelAddCallback_;
+    std::function<void(float)> ssgiExposureCallback_;
+    std::function<void(float)> ssgiIntensityCallback_;
+    std::function<void(int)> ssgiMaxStepsCallback_;
+    std::function<void(float)> ssgiMaxDistanceCallback_;
+    std::function<void(float)> ssgiStepSizeCallback_;
+    std::function<void(float)> ssgiThicknessCallback_;
+    std::function<void(int)> ssgiNumSamplesCallback_;
     
     // Resource cache callbacks
     std::function<std::vector<std::string>()> getTextureNamesCallback_;

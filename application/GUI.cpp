@@ -240,9 +240,13 @@ void GUI::render_controls() {
         static bool enableShadows = true;
         static bool enableSSAO = false;
         static float shadowBias = 0.005f;
+        static bool enableSSGI = true;
+        static float ssgiExposure = 1.0f;    // Higher default exposure for brighter result
+        static float ssgiIntensity = 3.0f;   // Higher default intensity
 
         ImGui::Checkbox("Enable Shadows", &enableShadows);
         ImGui::Checkbox("Enable SSAO", &enableSSAO);
+        ImGui::Checkbox("Enable SSGI", &enableSSGI);
 
         if (enableShadows) {
           ImGui::Text("Shadow Map Size");
@@ -252,6 +256,66 @@ void GUI::render_controls() {
 
           ImGui::Text("Shadow Bias");
           ImGui::SliderFloat("##shadowBias", &shadowBias, 0.001f, 0.01f, "%.4f");
+        }
+        
+        if (enableSSGI) {
+          ImGui::Text("SSGI Exposure");
+          if (ImGui::SliderFloat("##ssgiExposure", &ssgiExposure, 0.1f, 5.0f, "%.2f")) {
+            if (ssgiExposureCallback_) {
+              ssgiExposureCallback_(ssgiExposure);
+            }
+          }
+          
+          ImGui::Text("SSGI Intensity");
+          if (ImGui::SliderFloat("##ssgiIntensity", &ssgiIntensity, 0.1f, 5.0f, "%.2f")) {
+            if (ssgiIntensityCallback_) {
+              ssgiIntensityCallback_(ssgiIntensity);
+            }
+          }
+          
+          ImGui::Separator();
+          ImGui::Text("SSGI Compute Parameters");
+          
+          static int ssgiMaxSteps = 32;
+          static float ssgiMaxDistance = 6.0f;
+          static float ssgiStepSize = 0.15f;
+          static float ssgiThickness = 1.2f;     // Higher for better hit detection
+          static int ssgiNumSamples = 8;
+          
+          ImGui::Text("Max Steps");
+          if (ImGui::SliderInt("##ssgiMaxSteps", &ssgiMaxSteps, 8, 64)) {
+            if (ssgiMaxStepsCallback_) {
+              ssgiMaxStepsCallback_(ssgiMaxSteps);
+            }
+          }
+          
+          ImGui::Text("Max Distance");
+          if (ImGui::SliderFloat("##ssgiMaxDistance", &ssgiMaxDistance, 1.0f, 20.0f, "%.1f")) {
+            if (ssgiMaxDistanceCallback_) {
+              ssgiMaxDistanceCallback_(ssgiMaxDistance);
+            }
+          }
+          
+          ImGui::Text("Step Size");
+          if (ImGui::SliderFloat("##ssgiStepSize", &ssgiStepSize, 0.05f, 0.5f, "%.3f")) {
+            if (ssgiStepSizeCallback_) {
+              ssgiStepSizeCallback_(ssgiStepSize);
+            }
+          }
+          
+          ImGui::Text("Thickness");
+          if (ImGui::SliderFloat("##ssgiThickness", &ssgiThickness, 0.2f, 3.0f, "%.2f")) {
+            if (ssgiThicknessCallback_) {
+              ssgiThicknessCallback_(ssgiThickness);
+            }
+          }
+          
+          ImGui::Text("Num Samples");
+          if (ImGui::SliderInt("##ssgiNumSamples", &ssgiNumSamples, 1, 16)) {
+            if (ssgiNumSamplesCallback_) {
+              ssgiNumSamplesCallback_(ssgiNumSamples);
+            }
+          }
         }
         ImGui::Spacing();
         });
@@ -790,4 +854,32 @@ void GUI::with_font(ImFont* font, std::function<void()> func){
 
 void GUI::set_model_add_callback(std::function<void(const std::string&)> callback) {
     modelAddCallback_ = callback;
+}
+
+void GUI::set_ssgi_exposure_callback(std::function<void(float)> callback) {
+    ssgiExposureCallback_ = callback;
+}
+
+void GUI::set_ssgi_intensity_callback(std::function<void(float)> callback) {
+    ssgiIntensityCallback_ = callback;
+}
+
+void GUI::set_ssgi_max_steps_callback(std::function<void(int)> callback) {
+    ssgiMaxStepsCallback_ = callback;
+}
+
+void GUI::set_ssgi_max_distance_callback(std::function<void(float)> callback) {
+    ssgiMaxDistanceCallback_ = callback;
+}
+
+void GUI::set_ssgi_step_size_callback(std::function<void(float)> callback) {
+    ssgiStepSizeCallback_ = callback;
+}
+
+void GUI::set_ssgi_thickness_callback(std::function<void(float)> callback) {
+    ssgiThicknessCallback_ = callback;
+}
+
+void GUI::set_ssgi_num_samples_callback(std::function<void(int)> callback) {
+    ssgiNumSamplesCallback_ = callback;
 }

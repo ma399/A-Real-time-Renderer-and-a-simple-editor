@@ -68,6 +68,15 @@ public:
     
     // InputManager access for GLFW callbacks
     InputManager* get_input_manager() const { return input_manager_.get(); }
+    
+    // SSGI parameter setters
+    void set_ssgi_exposure(float exposure);
+    void set_ssgi_intensity(float intensity);
+    void set_ssgi_max_steps(int max_steps);
+    void set_ssgi_max_distance(float max_distance);
+    void set_ssgi_step_size(float step_size);
+    void set_ssgi_thickness(float thickness);
+    void set_ssgi_num_samples(int num_samples);
 
 private:
     std::unique_ptr<Window> window_;
@@ -101,6 +110,17 @@ private:
     
     // Debug mode for G-Buffer visualization
     int gbuffer_debug_mode_;  // -1 = normal rendering, 0-6 = debug modes
+    
+    // SSGI parameters
+    float ssgi_exposure_;
+    float ssgi_intensity_;
+    
+    // SSGI compute parameters
+    int ssgi_max_steps_;
+    float ssgi_max_distance_;
+    float ssgi_step_size_;
+    float ssgi_thickness_;
+    int ssgi_num_samples_;
 
     void update_delta_time();
     void setup_event_handlers();

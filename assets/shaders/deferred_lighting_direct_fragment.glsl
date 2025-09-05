@@ -275,7 +275,7 @@ void main()
         // Shadow calculation 
         float shadow = 1.0; 
         
-        if (enableShadows && i == 0 && lightTypes[i] == 0) {  
+        if (i == 0 && lightTypes[i] == 0) {  // Apply shadows to first directional light
             vec4 fragPosLightSpace = lightSpaceMatrix * vec4(WorldPos, 1.0);
             shadow = ShadowCalculation(fragPosLightSpace, N, L);
         }

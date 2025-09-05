@@ -51,6 +51,13 @@ namespace glRenderer {
        ssgi_prev_texture_(nullptr),
        lit_scene_texture_(nullptr),
        use_ssgi_(false),
+       ssgi_exposure_(1.0f),    // Match GUI default - higher for brighter result
+       ssgi_intensity_(3.0f),   // Match GUI default - higher intensity
+       ssgi_max_steps_(32),
+       ssgi_max_distance_(6.0f),
+       ssgi_step_size_(0.15f),
+       ssgi_thickness_(1.2f),   // Match GUI default for better hit detection
+       ssgi_num_samples_(8),
        hiz_textures_{0, 0},
        final_hiz_texture_(0),
        hiz_mip_levels_(0),
@@ -493,14 +500,11 @@ namespace glRenderer {
             
             // Render skybox to main framebuffer before composition
             glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-            render_skybox(camera, resource_manager);
+            //render_skybox(camera, resource_manager);
            
             // LOG_INFO("Renderer: SSGI composition pass");
             render_composition_pass(scene, camera, resource_manager);
-            
-            // LOG_INFO("Renderer: Final skybox render");
-            // Note: Skybox should be rendered before composition, not after
-            // The composition shader will let skybox pixels show through
+
         } else {
             // Traditional deferred lighting
             bind_g_buffer_for_lighting_pass();
@@ -551,21 +555,30 @@ namespace glRenderer {
                 }
             }
         
-            // IBL irradiance mapping
+            // IBL irradiance and prefiltered mapping
             auto irradiance_map = resource_manager.get_irradiance_map("skybox_cubemap");
+            auto prefiltered_map = resource_manager.get_prefiltered_map("skybox_cubemap");
         
-            if (irradiance_map) {
+            if (irradiance_map && prefiltered_map) {
                 lighting_shader->set_bool("useIBL", true);
             
                 // Bind irradiance map using automatic slot management
-                unsigned int slot = irradiance_map->bind_cubemap_auto();
-                if (slot != Texture::INVALID_SLOT) {
-                    lighting_shader->set_int("irradianceMap", slot);
-                    LOG_INFO("Renderer: IBL irradiance map bound to texture unit {} (ID: {})", slot, irradiance_map->get_id());
+                unsigned int irradiance_slot = irradiance_map->bind_cubemap_auto();
+                if (irradiance_slot != Texture::INVALID_SLOT) {
+                    lighting_shader->set_int("irradianceMap", irradiance_slot);
                 }
+                
+                // Bind prefiltered environment map using automatic slot management
+                unsigned int prefiltered_slot = prefiltered_map->bind_cubemap_auto();
+                if (prefiltered_slot != Texture::INVALID_SLOT) {
+                    lighting_shader->set_int("prefilteredMap", prefiltered_slot);
+                }
+                
+                LOG_INFO("Renderer: IBL maps bound - irradiance: slot {}, prefiltered: slot {}", irradiance_slot, prefiltered_slot);
             } else {
                 lighting_shader->set_bool("useIBL", false);
-                LOG_WARN("Renderer: No irradiance map found, using fallback ambient lighting");
+                LOG_WARN("Renderer: IBL maps not available (irradiance: {}, prefiltered: {}), using fallback ambient lighting", 
+                        irradiance_map ? "OK" : "missing", prefiltered_map ? "OK" : "missing");
             }
         
             // Shadow mapping (if enabled)
@@ -590,9 +603,10 @@ namespace glRenderer {
                 // For directional light shadows, center the shadow map around the scene center
                 glm::vec3 shadow_center = glm::vec3(0.0f, 0.0f, 0.0f); // Use scene center as shadow map center
             
-                // Set light space matrix for shadow mapping
-                glm::mat4 lightSpaceMatrix = shadow_map->get_light_space_matrix(shadow_light_direction, shadow_center);
-                lighting_shader->set_mat4("lightSpaceMatrix", lightSpaceMatrix);
+                // Set light space matrix for shadow mapping (use the same matrix from shadow pass)
+                lighting_shader->set_mat4("lightSpaceMatrix", last_light_space_matrix_);
+            } else {
+                lighting_shader->set_bool("enableShadows", false);
             }
         
             // Render screen-space quad
@@ -612,7 +626,7 @@ namespace glRenderer {
             //render_plane_reflection(scene, camera, resource_manager, transform_manager);
         
             // Render light spheres for visualization
-            render_light_spheres(scene, camera, resource_manager);
+            //render_light_spheres(scene, camera, resource_manager);
     }
     
     void Renderer::render_gbuffer_debug(int debug_mode, const CoroutineResourceManager& resource_manager) {
@@ -1377,6 +1391,41 @@ namespace glRenderer {
         LOG_INFO("SSGI {}", enable ? "enabled" : "disabled");
     }
 
+    void Renderer::set_ssgi_exposure(float exposure) {
+        ssgi_exposure_ = exposure;
+        LOG_DEBUG("Renderer: SSGI exposure set to {}", exposure);
+    }
+
+    void Renderer::set_ssgi_intensity(float intensity) {
+        ssgi_intensity_ = intensity;
+        LOG_DEBUG("Renderer: SSGI intensity set to {}", intensity);
+    }
+
+    void Renderer::set_ssgi_max_steps(int max_steps) {
+        ssgi_max_steps_ = max_steps;
+        LOG_DEBUG("Renderer: SSGI max steps set to {}", max_steps);
+    }
+
+    void Renderer::set_ssgi_max_distance(float max_distance) {
+        ssgi_max_distance_ = max_distance;
+        LOG_DEBUG("Renderer: SSGI max distance set to {}", max_distance);
+    }
+
+    void Renderer::set_ssgi_step_size(float step_size) {
+        ssgi_step_size_ = step_size;
+        LOG_DEBUG("Renderer: SSGI step size set to {}", step_size);
+    }
+
+    void Renderer::set_ssgi_thickness(float thickness) {
+        ssgi_thickness_ = thickness;
+        LOG_DEBUG("Renderer: SSGI thickness set to {}", thickness);
+    }
+
+    void Renderer::set_ssgi_num_samples(int num_samples) {
+        ssgi_num_samples_ = num_samples;
+        LOG_DEBUG("Renderer: SSGI num samples set to {}", num_samples);
+    }
+
     // SSAO Implementation
     void Renderer::setup_ssao() {
         setup_ssao_textures();
@@ -1772,13 +1821,13 @@ namespace glRenderer {
         ssgi_compute_shader->set_mat4("invProjection", invProjection);
         ssgi_compute_shader->set_vec3("viewPos", viewPos);
 
-        // Set SSGI parameters - optimized for mipmap acceleration
-        ssgi_compute_shader->set_int("maxSteps", 32);        // Fewer steps due to adaptive stepping
-        ssgi_compute_shader->set_float("maxDistance", 8.0f);  // Longer max distance with acceleration
-        ssgi_compute_shader->set_float("stepSize", 0.05f);    // Base step size for adaptive algorithm
-        ssgi_compute_shader->set_float("thickness", 0.4f);   // Slightly thicker for mipmap tolerance
-        ssgi_compute_shader->set_float("intensity", 1.0f);
-        ssgi_compute_shader->set_int("numSamples", 8);
+        // Set SSGI parameters - use dynamic values from member variables
+        ssgi_compute_shader->set_int("maxSteps", ssgi_max_steps_);
+        ssgi_compute_shader->set_float("maxDistance", ssgi_max_distance_);
+        ssgi_compute_shader->set_float("stepSize", ssgi_step_size_);
+        ssgi_compute_shader->set_float("thickness", ssgi_thickness_);
+        ssgi_compute_shader->set_float("intensity", ssgi_intensity_);
+        ssgi_compute_shader->set_int("numSamples", ssgi_num_samples_);
 
         // Bind output texture
         glBindImageTexture(0, ssgi_raw_texture_->get_id(), 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
@@ -1941,7 +1990,6 @@ namespace glRenderer {
         // LOG_DEBUG("Renderer: Composition pass - combining direct lighting and SSGI");
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
         glViewport(0, 0, viewport_width_, viewport_height_);
-        // Don't clear - skybox is already rendered
         
         // Disable depth testing for screen-space quad
         glDisable(GL_DEPTH_TEST);
@@ -2000,11 +2048,19 @@ namespace glRenderer {
         
         // IBL setup
         auto irradiance_map = resource_manager.get_irradiance_map("skybox_cubemap");
-        if (irradiance_map) {
-            unsigned int slot = irradiance_map->bind_cubemap_auto();
-            if (slot != Texture::INVALID_SLOT) {
-                composition_shader->set_int("irradianceMap", slot);
+        auto prefiltered_map = resource_manager.get_prefiltered_map("skybox_cubemap");
+        
+        if (irradiance_map && prefiltered_map) {
+            unsigned int irradiance_slot = irradiance_map->bind_cubemap_auto();
+            if (irradiance_slot != Texture::INVALID_SLOT) {
+                composition_shader->set_int("irradianceMap", irradiance_slot);
             }
+            
+            unsigned int prefiltered_slot = prefiltered_map->bind_cubemap_auto();
+            if (prefiltered_slot != Texture::INVALID_SLOT) {
+                composition_shader->set_int("prefilteredMap", prefiltered_slot);
+            }
+            
             composition_shader->set_bool("useIBL", true);
         } else {
             composition_shader->set_bool("useIBL", false);
@@ -2012,7 +2068,8 @@ namespace glRenderer {
         
         // SSGI controls
         composition_shader->set_bool("enableSSGI", use_ssgi_);
-        composition_shader->set_float("ssgiIntensity", 1.0f);
+        composition_shader->set_float("ssgiIntensity", ssgi_intensity_);
+        composition_shader->set_float("exposure", ssgi_exposure_);
         
         // Render screen-space quad
         render_screen_quad();
